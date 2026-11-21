@@ -391,3 +391,115 @@ def test_bot_added_and_removed_updates_presence(tmp_path):
     )
     asyncio.run(DP.feed_update(BOT, removed, services=services))
     assert services.groups.get(-1004).present is False
+# ---- /context ---------------------------------------------------------------------------
+
+
+def _command_update(uid: int, text: str) -> Update:
+    message = Message(
+        message_id=next(_ids),
+        date=0,
+        chat=Chat(id=uid, type="private"),
+        from_user=_user(uid),
+        text=text,
+        entities=[MessageEntity(type="bot_command", offset=0, length=len(text))],
+    )
+    return Update(update_id=next(_ids), message=message)
+
+
+def test_context_shows_value_below_show_threshold(tmp_path):
+    services, runner = _services(tmp_path)
+    SESSION.member_status = "member"
+    uid = next(_ids)
+    asyncio.run(services.store.add_session(uid, _session("aaaaaaaa", "Quiet", usage=0.2)))
+    asyncio.run(services.store.set_active(uid, "aaaaaaaa"))
+    asyncio.run(_feed(_command_update(uid, "/context"), services))
+    assert ui.CONTEXT_VALUE.format(name="Quiet", value="2.0%") in _sent()
+    assert runner.prompts == []
+
+
+def test_context_in_full_state_shows_value_and_note(tmp_path):
+    services, runner = _services(tmp_path)
+    SESSION.member_status = "member"
+    uid = next(_ids)
+    asyncio.run(services.store.add_session(uid, _session("aaaaaaaa", "Big", usage=12.0)))
+    asyncio.run(services.store.set_active(uid, "aaaaaaaa"))
+    asyncio.run(_feed(_command_update(uid, "/context"), services))
+    sent = _sent()
+    expected = ui.CONTEXT_VALUE.format(name="Big", value="120.0%") + "\n" + ui.CONTEXT_FULL_NOTE
+    assert sent == [expected]
+    assert runner.prompts == []
+
+
+def test_context_without_value_says_unknown(tmp_path):
+    services, _ = _services(tmp_path)
+    SESSION.member_status = "member"
+    uid = next(_ids)
+    asyncio.run(services.store.add_session(uid, _session("aaaaaaaa", "New", usage=None)))
+    asyncio.run(services.store.set_active(uid, "aaaaaaaa"))
+    asyncio.run(_feed(_command_update(uid, "/context"), services))
+    assert ui.CONTEXT_UNKNOWN.format(name="New") in _sent()
+
+
+def test_context_without_active_session(tmp_path):
+    services, _ = _services(tmp_path)
+    SESSION.member_status = "member"
+    asyncio.run(_feed(_command_update(next(_ids), "/context"), services))
+    assert _sent() == [ui.NO_ACTIVE]
+
+
+def test_context_command_is_not_taken_as_session_name(tmp_path):
+    services, _ = _services(tmp_path)
+    SESSION.member_status = "member"
+    uid = next(_ids)
+    asyncio.run(_feed(_callback_update(uid, ui.MenuCb(action="new").pack()), services))
+    asyncio.run(_feed(_command_update(uid, "/context"), services))
+    assert ui.NO_ACTIVE in _sent()  # answered as a command, the name prompt is still active
+    assert services.store.get_user(uid).sessions == []
+# ---- Command menu ------------------------------------------------------------------------
+
+
+def test_command_menu_names_are_valid():
+    import re
+
+    from bot.ui import BOT_COMMANDS
+
+    names = [c.command for c in BOT_COMMANDS]
+    assert {"new", "sessions", "summary", "context"} <= set(names)
+    assert all(re.fullmatch(r"[a-z0-9_]{1,32}", n) for n in names)
+
+
+def test_new_command_asks_for_name_and_takes_it(tmp_path):
+    services, runner = _services(tmp_path)
+    SESSION.member_status = "member"
+    uid = next(_ids)
+    asyncio.run(_feed(_command_update(uid, "/new"), services))
+    assert ui.ASK_NAME in _sent()
+    asyncio.run(_feed(_text_update(uid, "Команда"), services))
+    assert ui.NEW_READY.format(name="Команда") in _sent()
+
+
+def test_sessions_command_shows_empty_message(tmp_path):
+    services, _ = _services(tmp_path)
+    SESSION.member_status = "member"
+    asyncio.run(_feed(_command_update(next(_ids), "/sessions"), services))
+    assert ui.EMPTY_LIST in _sent()
+
+
+def test_summary_command_without_active_session(tmp_path):
+    services, runner = _services(tmp_path)
+    SESSION.member_status = "member"
+    asyncio.run(_feed(_command_update(next(_ids), "/summary"), services))
+    assert _sent() == [ui.NO_ACTIVE]
+    assert runner.prompts == []
+def test_start_command_shows_text_and_command_keyboard(tmp_path):
+    from aiogram.types import ReplyKeyboardMarkup
+
+    services, runner = _services(tmp_path)
+    SESSION.member_status = "member"
+    asyncio.run(_feed(_command_update(next(_ids), "/start"), services))
+    assert ui.START_TEXT in _sent()
+    markup = [m.reply_markup for m in SESSION.calls if isinstance(m, SendMessage)][-1]
+    assert isinstance(markup, ReplyKeyboardMarkup)
+    labels = [b.text for row in markup.keyboard for b in row]
+    assert labels == ["/new", "/sessions", "/summary", "/context"]
+    assert runner.prompts == []

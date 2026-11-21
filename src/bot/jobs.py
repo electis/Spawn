@@ -6,6 +6,7 @@ The Session_Store changes only on the success paths described in the design.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from bot.dispatcher import DeleteJob, Job, SummaryJob, TextJob
 from bot.kiro_parser import RunResult
 from bot.models import SessionRecord
 from bot.session_store import SessionStore
+from bot.refusal import REFUSAL_REPLIES
 from bot.splitter import split_reply
 from bot.summary import SUMMARY_PROMPT
 
@@ -83,10 +85,12 @@ class JobProcessor:
         result = await self.runner.run_prompt(workdir, resume_id, job.text)
 
         if result.error is not None or result.final_text is None:
-            await self.notifier.send_text(
-                job.user_id,
-                NEW_SESSION_FAILED_TEXT if session is None and job.pending_name else ERROR_TEXT,
-            )
+            if result.refused:
+                await self.notifier.send_text(job.user_id, random.choice(REFUSAL_REPLIES))
+                return
+            base = NEW_SESSION_FAILED_TEXT if session is None and job.pending_name else ERROR_TEXT
+            reason = result.error or "пустой ответ"
+            await self.notifier.send_text(job.user_id, f"{base}\nПричина: {reason}")
             return
 
         when = self.now()
@@ -132,6 +136,9 @@ class JobProcessor:
         workdir = self.runner.workdir_for(job.user_id)
         result = await self.runner.run_prompt(workdir, session.session_id, SUMMARY_PROMPT)
         if result.error is not None or result.final_text is None:
+            if result.refused:
+                await self.notifier.send_text(job.user_id, random.choice(REFUSAL_REPLIES))
+                return
             await self.notifier.send_text(job.user_id, SUMMARY_FAILED_TEXT)
             return
 

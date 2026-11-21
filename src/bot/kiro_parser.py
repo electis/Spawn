@@ -18,12 +18,16 @@ from dataclasses import dataclass
 from typing import Any
 
 
+NO_FINAL_TEXT = "kiro-cli returned no final text"
+
+
 @dataclass(frozen=True)
 class RunResult:
     session_id: str | None
     final_text: str | None
     context_usage: float | None  # None when neither usage source appeared in the stream
     error: str | None
+    refused: bool = False  # the model refused to answer (stopReason refusal)
 
 
 def _number(value: Any) -> float | None:
@@ -51,6 +55,7 @@ def parse_stream(lines: Iterable[str]) -> RunResult:
     session_id: str | None = None
     final_text: str | None = None
     run_status: str | None = None
+    run_reason: str | None = None
     run_error: str | None = None
     primary_usage: float | None = None
     fallback_usage: float | None = None
@@ -87,6 +92,8 @@ def parse_stream(lines: Iterable[str]) -> RunResult:
                 session_id = sid
             text = data.get("finalText")
             final_text = text if isinstance(text, str) else None
+            reason = data.get("stopReason")
+            run_reason = reason if isinstance(reason, str) else None
             status = data.get("status")
             run_status = status if isinstance(status, str) else None
         elif kind == "runError":
@@ -98,7 +105,13 @@ def parse_stream(lines: Iterable[str]) -> RunResult:
     if run_error is not None:
         return RunResult(session_id, None, usage, run_error)
     if final_text is None:
-        return RunResult(session_id, None, usage, "kiro-cli returned no final text")
+        return RunResult(session_id, None, usage, NO_FINAL_TEXT)
     if run_status is not None and run_status != "success":
-        return RunResult(session_id, None, usage, f"kiro-cli run status: {run_status}")
+        if run_reason == "refusal":
+            message = "модель отказалась ответить на этот запрос"
+        else:
+            message = f"kiro-cli run status {run_status}, stop reason {run_reason or "unknown"}"
+        if final_text:
+            message += f". Текст kiro-cli: {final_text}"
+        return RunResult(session_id, None, usage, message, refused=run_reason == "refusal")
     return RunResult(session_id, final_text, usage, None)

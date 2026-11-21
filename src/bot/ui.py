@@ -1,4 +1,4 @@
-﻿"""Keyboards, callback data, and user-facing texts (Requirements 4.7, 5, 6, 7, 10).
+"""Keyboards, callback data, and user-facing texts (Requirements 4.7, 5, 6, 7, 10).
 
 Callback data carries only short ids and actions, never a Session_Name (Requirement 6.4).
 """
@@ -6,7 +6,13 @@ Callback data carries only short ids and actions, never a Session_Name (Requirem
 from __future__ import annotations
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 from bot.pagination import Page
 
@@ -47,6 +53,10 @@ NEW_READY = "Сессия «{name}» будет активной после пе
 SUMMARY_STARTED = "Делаю выжимку. Когда она будет готова, введите имя новой сессии."
 SUMMARY_NAME_PROMPT = "Введите имя новой сессии для выжимки."
 CHOICE_TEXT = "Какую сессию сделать активной?"
+CONTEXT_VALUE = "Сессия «{name}»: заполненность {value}."
+CONTEXT_UNKNOWN = "Сессия «{name}»: данных о заполненности пока нет."
+CONTEXT_PENDING = "Сессия «{name}» ещё не создана. Заполненность появится после первого ответа."
+CONTEXT_FULL_NOTE = "Сессия заполнена: обычные сообщения не принимаются. Сделайте выжимку или начните новую беседу."
 
 
 def button(text: str, data: CallbackData) -> InlineKeyboardButton:
@@ -107,3 +117,25 @@ def choice_markup(new_sid: str, old_sid: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+# Command menu shown in private chats. Each command runs the same action as a button.
+BOT_COMMANDS: list[BotCommand] = [
+    BotCommand(command="new", description="Новая беседа"),
+    BotCommand(command="sessions", description="Список сессий"),
+    BotCommand(command="summary", description="Выжимка в новую сессию"),
+    BotCommand(command="context", description="Заполненность контекста"),
+]
+START_TEXT = (
+    "Здесь ваши сообщения передаются в kiro-cli. Каждая сессия хранит свою беседу.\n"
+    "/new — новая беседа\n"
+    "/sessions — список сессий\n"
+    "/summary — выжимка в новую сессию\n"
+    "/context — заполненность контекста\n"
+    "Кнопки команд — внизу экрана."
+)
+
+
+def commands_keyboard() -> ReplyKeyboardMarkup:
+    rows = [[KeyboardButton(text=f"/{c.command}") for c in BOT_COMMANDS[:2]],
+            [KeyboardButton(text=f"/{c.command}") for c in BOT_COMMANDS[2:]]]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)

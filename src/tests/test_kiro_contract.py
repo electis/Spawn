@@ -100,6 +100,12 @@ def test_argv_without_session():
     assert "claude-haiku-5.5" in argv
 
 
+def test_argv_trusts_no_tools():
+    argv = build_argv(None)
+    assert "--trust-tools=" in argv
+    assert not any(a.startswith("--trust-all") or a == "-a" for a in argv)
+
+
 def test_argv_with_session():
     argv = build_argv(SESSION)
     assert argv[-2:] == ["--resume-id", SESSION]
@@ -131,7 +137,7 @@ def test_text_goes_only_through_stdin(tmp_path_factory, text):
     result, log = _run(tmp_path, text)
     assert result.final_text == "OK"
     assert log["stdin"] == text
-    assert all(text not in arg for arg in log["argv"])
+    assert text not in log["argv"]  # the text itself is never an argument
 
 
 # Feature: telegram-kiro-bot, Property 7: Resume argument matches the stored Session_ID
@@ -182,3 +188,49 @@ def test_delete_rejects_bad_session_id_without_running(tmp_path):
     error = asyncio.run(runner.delete_session(runner.workdir_for(1), "bad id"))
     assert error == "invalid session id"
     assert not (tmp_path / "log.json").exists()
+
+
+REFUSAL_RUN = {
+    "type": "runFinished",
+    "data": {
+        "sessionId": SESSION,
+        "status": "error",
+        "stopReason": "refusal",
+        "finalText": "The selected model cannot continue this conversation.",
+    },
+}
+
+
+def test_refusal_is_reported_with_reason_and_session():
+    result = parse_stream(_lines(REFUSAL_RUN))
+    assert result.final_text is None
+    assert result.session_id == SESSION
+    assert "отказалась" in result.error
+    assert "cannot continue" in result.error
+
+
+def test_refusal_exit_code_keeps_reason(tmp_path):
+    out = "\n".join(_lines(REFUSAL_RUN)) + "\n"
+    fake = make_fake_kiro(tmp_path)
+    env = fake_env(tmp_path, out_text=out, FAKE_RC="1")
+    runner = KiroRunner(str(fake), env, tmp_path / "workdirs", timeout=10)
+    result = asyncio.run(runner.run_prompt(runner.workdir_for(3), None, "hi"))
+    assert result.error is not None
+    assert "отказалась" in result.error
+    assert "exited with code" not in result.error
+
+
+def test_exit_code_without_stream_reason_is_still_an_error(tmp_path):
+    fake = make_fake_kiro(tmp_path)
+    env = fake_env(tmp_path, out_text="", FAKE_RC="2")
+    runner = KiroRunner(str(fake), env, tmp_path / "workdirs", timeout=10)
+    result = asyncio.run(runner.run_prompt(runner.workdir_for(3), None, "hi"))
+    assert result.error == "kiro-cli exited with code 2"
+
+def test_refusal_sets_refused_flag():
+    assert parse_stream(_lines(REFUSAL_RUN)).refused is True
+
+
+def test_other_failures_are_not_refusals():
+    assert parse_stream(_lines({"type": "runError", "data": {"message": "boom"}})).refused is False
+    assert parse_stream(_lines(RUN_FINISHED)).refused is False

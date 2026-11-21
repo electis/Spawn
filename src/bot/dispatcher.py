@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ Job = TextJob | SummaryJob | DeleteJob
 JobHandler = Callable[[Job], Awaitable[None]]
 BlockCheck = Callable[[TextJob], bool]
 BlockedHandler = Callable[[TextJob], Awaitable[None]]
+TypingHandler = Callable[[int], Awaitable[None]]  # sends a "typing" chat action to a user
 
 
 class UserDispatcher:
@@ -47,10 +49,14 @@ class UserDispatcher:
         handle: JobHandler,
         is_blocked: BlockCheck | None = None,
         on_blocked: BlockedHandler | None = None,
+        show_typing: TypingHandler | None = None,
+        typing_interval: float = 4.0,
     ) -> None:
         self._handle = handle
         self._is_blocked = is_blocked
         self._on_blocked = on_blocked
+        self._show_typing = show_typing
+        self._typing_interval = typing_interval
         self._queues: dict[int, asyncio.Queue[Job]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -72,6 +78,29 @@ class UserDispatcher:
         while self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
 
+    async def _run_with_typing(self, job: Job) -> None:
+        """Run a job while the chat shows "typing" (text, summary, and delete)."""
+        if self._show_typing is None:
+            await self._handle(job)
+            return
+        typing = asyncio.create_task(self._typing_loop(job.user_id))
+        try:
+            await self._handle(job)
+        finally:
+            typing.cancel()
+            with suppress(asyncio.CancelledError):
+                await typing
+
+    async def _typing_loop(self, user_id: int) -> None:
+        # Telegram shows a typing action for about 5 seconds, so it is refreshed every 4.
+        assert self._show_typing is not None
+        while True:
+            try:
+                await self._show_typing(user_id)
+            except Exception as exc:  # noqa: BLE001 - a missing indicator must not fail the job
+                logger.debug("typing action failed: %s", type(exc).__name__)
+            await asyncio.sleep(self._typing_interval)
+
     async def _worker(self, user_id: int, queue: asyncio.Queue[Job]) -> None:
         while True:
             job = await queue.get()
@@ -81,7 +110,7 @@ class UserDispatcher:
                     if self._on_blocked is not None:
                         await self._on_blocked(job)
                 else:
-                    await self._handle(job)
+                    await self._run_with_typing(job)
             except Exception as exc:  # noqa: BLE001 - one failed job must not stop the worker
                 logger.error("job %s failed: %s", type(job).__name__, type(exc).__name__)
             finally:

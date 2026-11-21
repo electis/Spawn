@@ -27,6 +27,9 @@ class AiogramNotifier:
     async def send_text(self, user_id: int, text: str) -> None:
         await self._bot.send_message(user_id, text)
 
+    async def send_typing(self, user_id: int) -> None:
+        await self._bot.send_chat_action(user_id, "typing")
+
     async def send_reply(
         self,
         user_id: int,

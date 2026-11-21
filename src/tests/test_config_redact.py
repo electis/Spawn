@@ -32,9 +32,9 @@ def test_missing_group_list_is_an_error():
         parse_config('store_path = "x"\nworkdir_root = "y"\n')
 
 
-def test_empty_group_list_is_an_error():
-    with pytest.raises(ConfigError):
-        parse_config(CONFIG_OK.replace("[-1001234567890]", "[]"))
+def test_empty_group_list_is_allowed():
+    cfg = parse_config(CONFIG_OK.replace("[-1001234567890]", "[]"))
+    assert cfg.configured_group_ids == ()
 
 
 def test_token_env_takes_precedence(tmp_path):

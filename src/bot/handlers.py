@@ -1,4 +1,4 @@
-﻿"""Telegram handlers for private chats (Requirements 4.6, 4.7, 5, 6, 7, 10).
+"""Telegram handlers for private chats (Requirements 4.6, 4.7, 5, 6, 7, 10).
 
 Only private messages reach these handlers: the middleware in bot/middleware.py drops the rest.
 """
@@ -8,10 +8,11 @@ from __future__ import annotations
 import secrets
 
 from aiogram import F, Router
-from aiogram.filters import StateFilter
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from bot.context_display import is_full
 from bot.dispatcher import DeleteJob, SummaryJob, TextJob
 from bot.pagination import page_of
 from bot.names import validate_session_name
@@ -19,6 +20,10 @@ from bot.state import PendingSession, Services, SessionNameStates
 from bot.ui import (
     ASK_NAME,
     CANCELLED,
+    CONTEXT_FULL_NOTE,
+    CONTEXT_PENDING,
+    CONTEXT_UNKNOWN,
+    CONTEXT_VALUE,
     DELETE_CONFIRM,
     EMPTY_LIST,
     FULL_TEXT,
@@ -29,6 +34,7 @@ from bot.ui import (
     NON_TEXT,
     OPEN_TEXT,
     PENDING_NOT_CREATED,
+    START_TEXT,
     SUMMARY_STARTED,
     ChoiceCb,
     MenuCb,
@@ -36,6 +42,7 @@ from bot.ui import (
     SessionCb,
     delete_confirm_markup,
     options_markup,
+    commands_keyboard,
     session_list_markup,
 )
 
@@ -75,7 +82,7 @@ async def _send_list(message: Message, services: Services, user_id: int, page: i
 # ---- Messages ---------------------------------------------------------------------------
 
 
-@router.message(SessionNameStates.awaiting_name, F.text)
+@router.message(SessionNameStates.awaiting_name, F.text, ~F.text.startswith("/"))
 async def on_session_name(message: Message, state: FSMContext, services: Services) -> None:
     user_id = message.from_user.id
     data = await state.get_data()
@@ -99,6 +106,55 @@ async def on_session_name(message: Message, state: FSMContext, services: Service
 
     services.pending[user_id] = PendingSession(sid=sid, name=name)
     await message.answer(NEW_READY.format(name=name))
+
+
+# ---- Command menu (same actions as the buttons) ------------------------------------------
+
+
+@router.message(Command("start"))
+async def on_command_start(message: Message) -> None:
+    await message.answer(START_TEXT, reply_markup=commands_keyboard())
+
+
+@router.message(Command("new"))
+async def on_command_new(message: Message, state: FSMContext) -> None:
+    await state.set_state(SessionNameStates.awaiting_name)
+    await state.update_data(flow="new")
+    await message.answer(ASK_NAME)
+
+
+@router.message(Command("sessions"))
+async def on_command_sessions(message: Message, services: Services) -> None:
+    await _send_list(message, services, message.from_user.id, 0)
+
+
+@router.message(Command("summary"))
+async def on_command_summary(message: Message, services: Services) -> None:
+    await _start_summary(message.from_user.id, services, message)
+
+@router.message(Command("context"))
+async def on_context(message: Message, services: Services) -> None:
+    """Show the context size of the Active_Session, whatever its value (not gated)."""
+    user_id = message.from_user.id
+    sid = _active_sid(services, user_id)
+    if sid is None:
+        await message.answer(NO_ACTIVE, reply_markup=options_markup(show_summarize=False))
+        return
+    pending = services.pending.get(user_id)
+    if pending is not None and pending.sid == sid:
+        await message.answer(CONTEXT_PENDING.format(name=pending.name))
+        return
+    session = services.store.find_session(user_id, sid)
+    if session is None:
+        await message.answer(NO_ACTIVE, reply_markup=options_markup(show_summarize=False))
+        return
+    if session.context_usage is None:
+        await message.answer(CONTEXT_UNKNOWN.format(name=session.name))
+        return
+    text = CONTEXT_VALUE.format(name=session.name, value=f"{session.context_usage * 10:.1f}%")
+    if is_full(session.context_usage):
+        text += "\n" + CONTEXT_FULL_NOTE
+    await message.answer(text)
 
 
 @router.message(F.text)
@@ -146,23 +202,27 @@ async def on_list(query: CallbackQuery, services: Services) -> None:
         await _send_list(query.message, services, query.from_user.id, 0)
 
 
-@router.callback_query(MenuCb.filter(F.action == "sum"))
-async def on_summarize(query: CallbackQuery, services: Services) -> None:
-    user_id = query.from_user.id
-    await query.answer()
+async def _start_summary(user_id: int, services: Services, reply_to: Message | None) -> None:
     sid = _active_sid(services, user_id)
-    message = query.message
     if sid is None:
-        if message is not None:
-            await message.answer(NO_ACTIVE)
+        if reply_to is not None:
+            await reply_to.answer(NO_ACTIVE)
         return
     pending = services.pending.get(user_id)
     if pending is not None and pending.sid == sid:
-        if message is not None:
-            await message.answer(PENDING_NOT_CREATED)
+        if reply_to is not None:
+            await reply_to.answer(PENDING_NOT_CREATED)
         return
     # Summarize is never blocked by the Full state (Requirement 10.16).
     await services.dispatcher.submit(SummaryJob(user_id, sid))
+
+
+@router.callback_query(MenuCb.filter(F.action == "sum"))
+async def on_summarize(query: CallbackQuery, services: Services) -> None:
+    await query.answer()
+    reply_to = query.message if isinstance(query.message, Message) else None
+    await _start_summary(query.from_user.id, services, reply_to)
+
 
 
 # ---- Session list -----------------------------------------------------------------------

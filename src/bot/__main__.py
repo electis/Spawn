@@ -8,6 +8,7 @@ import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommandScopeAllPrivateChats
 
 from bot.admin import admin_router
 from bot.config import ConfigError, load_config
@@ -26,6 +27,7 @@ from bot.notifier import AiogramNotifier
 from bot.redact import SecretRedactor
 from bot.session_store import CorruptStoreError, SessionStore
 from bot.state import Services
+from bot.ui import BOT_COMMANDS
 
 ADMIN_KEY = "ADMIN_USERNAME"
 
@@ -72,6 +74,7 @@ async def run() -> int:
         processor.handle,
         is_blocked=gate.blocks,
         on_blocked=lambda job: notifier.send_full_options(job.user_id),
+        show_typing=notifier.send_typing,
     )
     services = Services(
         store=store,
@@ -88,6 +91,8 @@ async def run() -> int:
     dp.callback_query.outer_middleware(membership)
     dp.include_router(admin_router)
     dp.include_router(router)
+
+    await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats())
 
     await dp.start_polling(
         bot,

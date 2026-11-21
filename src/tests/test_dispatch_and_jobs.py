@@ -325,3 +325,106 @@ def test_pending_session_without_session_id_is_dropped_without_kiro(tmp_path):
     asyncio.run(run())
     assert runner.deleted == []
     assert store.get_user(1).sessions == []
+
+def test_typing_is_refreshed_while_a_text_job_runs_and_stops_after():
+    calls = []
+
+    async def handle(job):
+        await asyncio.sleep(0.05)
+
+    async def show(user_id):
+        calls.append(user_id)
+
+    async def run():
+        dispatcher = UserDispatcher(handle, show_typing=show, typing_interval=0.01)
+        await dispatcher.submit(TextJob(1, "aaaaaaaa", "hi"))
+        await dispatcher.drain()
+        stopped_at = len(calls)
+        await asyncio.sleep(0.05)
+        assert len(calls) == stopped_at  # no typing after the job finished
+
+    asyncio.run(run())
+    assert len(calls) >= 2
+    assert set(calls) == {1}
+
+
+def test_delete_job_shows_typing():
+    calls = []
+
+    async def handle(job):
+        await asyncio.sleep(0.02)
+
+    async def show(user_id):
+        calls.append(user_id)
+
+    async def run():
+        dispatcher = UserDispatcher(handle, show_typing=show, typing_interval=0.005)
+        await dispatcher.submit(DeleteJob(1, "aaaaaaaa"))
+        await dispatcher.drain()
+
+    asyncio.run(run())
+    assert len(calls) >= 1
+    assert set(calls) == {1}
+
+def test_failed_reply_shows_the_reason_to_the_user(tmp_path):
+    store = _store(tmp_path)
+    runner = FakeRunner(tmp_path, results=[RunResult("sess_00000001", None, None, "модель отказалась")])
+    notifier = FakeNotifier()
+    processor = JobProcessor(store, runner, notifier, now=lambda: "t1")
+
+    async def run():
+        await store.add_session(1, _session("aaaaaaaa"))
+        await processor.text(TextJob(1, "aaaaaaaa", "hi"))
+
+    asyncio.run(run())
+    assert notifier.texts[-1][1].endswith("Причина: модель отказалась")
+
+def test_refusal_gets_one_of_the_fixed_replies_and_store_is_unchanged(tmp_path):
+    from bot.refusal import REFUSAL_REPLIES
+
+    store = _store(tmp_path)
+    refusal = RunResult("sess_00000001", None, None, "модель отказалась", refused=True)
+    runner = FakeRunner(tmp_path, results=[refusal])
+    notifier = FakeNotifier()
+    processor = JobProcessor(store, runner, notifier, now=lambda: "t1")
+
+    async def run():
+        await store.add_session(1, _session("aaaaaaaa", usage=2.0))
+        await processor.text(TextJob(1, "aaaaaaaa", "how"))
+
+    asyncio.run(run())
+    assert len(notifier.texts) == 1
+    sent = notifier.texts[0][1]
+    assert sent in REFUSAL_REPLIES
+    assert "Причина" not in sent and "Сессия не изменена" not in sent
+    assert store.find_session(1, "aaaaaaaa").context_usage == 2.0
+
+
+def test_refusal_of_summary_gets_a_fixed_reply(tmp_path):
+    from bot.refusal import REFUSAL_REPLIES
+
+    store = _store(tmp_path)
+    runner = FakeRunner(tmp_path, results=[RunResult(None, None, None, "x", refused=True)])
+    notifier = FakeNotifier()
+    processor = JobProcessor(store, runner, notifier, now=lambda: "t1")
+
+    async def run():
+        await store.add_session(1, _session("aaaaaaaa"))
+        await processor.summary(SummaryJob(1, "aaaaaaaa"))
+
+    asyncio.run(run())
+    assert notifier.summaries == []
+    assert notifier.texts[0][1] in REFUSAL_REPLIES
+
+
+def test_refusal_on_pending_session_keeps_it_pending_and_creates_nothing(tmp_path):
+    from bot.refusal import REFUSAL_REPLIES
+
+    store = _store(tmp_path)
+    runner = FakeRunner(tmp_path, results=[RunResult("sess_00000002", None, None, "x", refused=True)])
+    notifier = FakeNotifier()
+    processor = JobProcessor(store, runner, notifier, now=lambda: "t1")
+
+    asyncio.run(processor.text(TextJob(1, "cccccccc", "how", pending_name="Новая")))
+    assert store.get_user(1).sessions == []
+    assert notifier.texts[0][1] in REFUSAL_REPLIES

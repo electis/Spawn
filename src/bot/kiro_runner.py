@@ -12,7 +12,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
-from bot.kiro_parser import RunResult, parse_stream
+from bot.kiro_parser import NO_FINAL_TEXT, RunResult, parse_stream
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,8 @@ BASE_ARGV: tuple[str, ...] = (
     MODEL,
     "--output-format",
     "stream-json",
+    # Trust no tools: headless runs have no approval prompt, so every tool call is refused.
+    "--trust-tools=",
 )
 DEFAULT_TIMEOUT_SECONDS = 600.0
 
@@ -85,9 +87,12 @@ class KiroRunner:
             return RunResult(None, None, None, "kiro-cli timed out")
 
         # stderr is read but not reported: it may repeat secrets from the environment.
-        if proc.returncode != 0:
-            return RunResult(None, None, None, f"kiro-cli exited with code {proc.returncode}")
-        return parse_stream(stdout.decode("utf-8", errors="replace").splitlines())
+        # The stream is parsed even on a non-zero exit: a refusal exits 1 and its reason is in
+        # runFinished.
+        parsed = parse_stream(stdout.decode("utf-8", errors="replace").splitlines())
+        if proc.returncode != 0 and parsed.error in (None, NO_FINAL_TEXT):
+            return RunResult(parsed.session_id, None, parsed.context_usage, f"kiro-cli exited with code {proc.returncode}")
+        return parsed
 
     async def delete_session(self, workdir: Path, session_id: str) -> str | None:
         """Delete a saved Session. None on success, otherwise an error text without secrets."""

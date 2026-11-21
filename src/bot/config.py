@@ -38,8 +38,8 @@ def parse_config(text: str) -> BotConfig:
         raise ConfigError(f"invalid TOML: {exc}") from exc
 
     groups = data.get("configured_group_ids")
-    if not isinstance(groups, list) or not groups or not all(_is_int(g) for g in groups):
-        raise ConfigError("configured_group_ids must be a non-empty list of integers")
+    if not isinstance(groups, list) or not all(_is_int(g) for g in groups):
+        raise ConfigError("configured_group_ids must be a list of integers (may be empty)")
 
     ttl = data.get("membership_ttl_seconds", DEFAULT_MEMBERSHIP_TTL_SECONDS)
     if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl < 0:
