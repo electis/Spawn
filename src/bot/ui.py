@@ -35,35 +35,35 @@ class ChoiceCb(CallbackData, prefix="c"):
     sid: str
 
 
-ASK_NAME = "Введите имя новой сессии (от 1 до 40 символов, без повтора имени)."
+ASK_NAME = "Как назовём эту беседу? Напиши имя."
 NAME_INVALID = "Имя пустое, длиннее 40 символов или уже занято. Введите другое имя."
-NO_ACTIVE = "Сессия не открыта. Откройте сессию из списка или создайте новую."
-PENDING_NOT_CREATED = "Сессия ещё не создана. Отправьте первое сообщение в новой сессии."
+NO_ACTIVE = "Беседа не открыта. Откройте беседу из списка или создайте новую."
+PENDING_NOT_CREATED = "Беседа ещё не создана. Отправьте первое сообщение в новой беседе."
 FULL_TEXT = (
-    "Сессия заполнена, обычные сообщения сейчас не принимаются. "
-    "Сделайте выжимку, начните новую беседу или откройте другую сессию из списка."
+    "Беседа заполнена, новые сообщения сейчас не принимаю. "
+    "Начни новую или удали старую."
 )
 NON_TEXT = "Поддерживаются только текстовые сообщения."
-EMPTY_LIST = "Сессий пока нет. Начните новую беседу."
-LIST_TITLE = "Ваши сессии (новые сверху):"
-OPEN_TEXT = "Открыта сессия «{name}»."
-DELETE_CONFIRM = "Удалить сессию «{name}»? Это действие нельзя отменить."
+EMPTY_LIST = "Бесед пока нет. Начни новую, когда будешь готов."
+LIST_TITLE = "Ваши беседы (новые сверху):"
+OPEN_TEXT = "Беседа «{name}» открыта. Говори, что нужно."
+DELETE_CONFIRM = "Удалить беседу «{name}»? Это нельзя отменить."
 CANCELLED = "Удаление отменено."
-NEW_READY = "Сессия «{name}» будет активной после первого ответа. Напишите сообщение."
-SUMMARY_STARTED = "Делаю выжимку. Когда она будет готова, введите имя новой сессии."
-SUMMARY_NAME_PROMPT = "Введите имя новой сессии для выжимки."
-CHOICE_TEXT = "Какую сессию сделать активной?"
-CONTEXT_VALUE = "Сессия «{name}»: заполненность {value}."
-CONTEXT_UNKNOWN = "Сессия «{name}»: данных о заполненности пока нет."
-CONTEXT_PENDING = "Сессия «{name}» ещё не создана. Заполненность появится после первого ответа."
-CONTEXT_FULL_NOTE = "Сессия заполнена: обычные сообщения не принимаются. Сделайте выжимку или начните новую беседу."
+NEW_READY = "Беседа «{name}» откроется, как только получу первое сообщение."
+SUMMARY_STARTED = "Подвожу итог. Скоро будет готов."
+SUMMARY_NAME_PROMPT = "Введите имя новой беседы для выжимки."
+CHOICE_TEXT = "Какую беседу сделать текущей?"
+CONTEXT_VALUE = "Беседа «{name}»: заполненность {value}."
+CONTEXT_UNKNOWN = "Беседа «{name}»: данных о заполненности пока нет."
+CONTEXT_PENDING = "Беседа «{name}» ещё не создана. Заполненность появится после первого ответа."
+CONTEXT_FULL_NOTE = "Беседа заполнена, новые сообщения не принимаю. Очисти её или начни новую."
 
 
-GROUP_NEW_TEXT = "Новая беседа начата. Следующее сообщение начнёт её."
-GROUP_CLEARED_TEXT = "Контекст очищен. Следующее сообщение начнёт новую беседу."
+GROUP_NEW_TEXT = "Новый разговор открыт. Говори, с чего начнём"
+GROUP_CLEARED_TEXT = "Контекст беседы очищен. Следующее сообщение начнёт новый разговор."
 GROUP_FULL_TEXT = (
-    "Сессия заполнена, сообщения сейчас не принимаются. "
-    "Нажмите «Очистить контекст», чтобы начать новую беседу."
+    "Беседа заполнена, сообщения сейчас не принимаю. "
+    "Нажмите «Очистить контекст» или начните новую беседу."
 )
 
 def button(text: str, data: CallbackData) -> InlineKeyboardButton:
@@ -80,7 +80,7 @@ def options_markup(show_summarize: bool = True) -> InlineKeyboardMarkup:
             button("Очистить контекст", MenuCb(action="clear")),
         ]
     )
-    rows.append([button("Список сессий", MenuCb(action="list"))])
+    rows.append([button("Список бесед", MenuCb(action="list"))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -123,8 +123,8 @@ def choice_markup(new_sid: str, old_sid: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                button("Новая сессия", ChoiceCb(action="new", sid=new_sid)),
-                button("Старая сессия", ChoiceCb(action="old", sid=old_sid)),
+                button("Новая беседа", ChoiceCb(action="new", sid=new_sid)),
+                button("Старая беседа", ChoiceCb(action="old", sid=old_sid)),
             ]
         ]
     )
@@ -132,8 +132,8 @@ def choice_markup(new_sid: str, old_sid: str) -> InlineKeyboardMarkup:
 # Command menu shown in private chats. Each command runs the same action as a button.
 BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="new", description="Новая беседа"),
-    BotCommand(command="sessions", description="Список сессий"),
-    BotCommand(command="summary", description="Выжимка в новую сессию"),
+    BotCommand(command="sessions", description="Список бесед"),
+    BotCommand(command="summary", description="Выжимка в новую беседу"),
     BotCommand(command="context", description="Заполненность контекста"),
 ]
 START_TEXT = (

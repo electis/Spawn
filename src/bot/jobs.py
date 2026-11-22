@@ -28,12 +28,12 @@ from bot.refusal import REFUSAL_REPLIES
 from bot.splitter import split_reply
 from bot.summary import SUMMARY_PROMPT
 
-ERROR_TEXT = "Не удалось получить ответ от kiro-cli. Сессия не изменена."
-NEW_SESSION_FAILED_TEXT = "Новая сессия не создана. Текущая сессия остаётся активной."
-SUMMARY_FAILED_TEXT = "Не удалось сделать выжимку. Текущая сессия не изменена."
-DELETE_FAILED_TEXT = "Не удалось удалить сессию. Она осталась в списке."
-DELETED_TEXT = "Сессия удалена. Откройте или создайте сессию, чтобы продолжить."
-NO_SESSION_TEXT = "Сессия не найдена. Откройте или создайте сессию."
+ERROR_TEXT = "Не удалось получить ответ от kiro-cli. Беседа не изменена."
+NEW_SESSION_FAILED_TEXT = "Новая беседа не создана. Текущая беседа остаётся активной."
+SUMMARY_FAILED_TEXT = "Не удалось сделать выжимку. Текущая беседа не изменена."
+DELETE_FAILED_TEXT = "Не удалось удалить беседу. Она осталась в списке."
+DELETED_TEXT = "Беседа удалена."
+NO_SESSION_TEXT = "Беседа не найдена. Откройте или создайте беседу."
 
 
 class Notifier(Protocol):

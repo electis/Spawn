@@ -3,7 +3,7 @@
 A group message reaches the bot when it:
 - mentions the bot by username (@RUSpawnAI), or
 - replies to a message from the bot, or
-- starts with the prefix "spawn" or "спаун" followed by one punctuation mark or space.
+- starts with the prefix "spawn", "спаун", or "спавн" followed by one punctuation mark or space.
 
 The prefix is matched without regard to case. It only arrives in a group when the bot's
 privacy mode is off in BotFather. The prefix and its separator are removed from the prompt.
@@ -13,9 +13,9 @@ from __future__ import annotations
 import re
 
 # One separator (any non-word character) after the prefix; the rest is the prompt.
-_PREFIX = re.compile(r"^(?:spawn|спаун)[^\w]\s*", re.IGNORECASE)
+_PREFIX = re.compile(r"^(?:spawn|спаун|спавн)[^\w]\s*", re.IGNORECASE)
 # The prefix may also end the message, as in "spawn?": nothing is left to answer.
-_PREFIX_ALONE = re.compile(r"^(?:spawn|спаун)[^\w]*$", re.IGNORECASE)
+_PREFIX_ALONE = re.compile(r"^(?:spawn|спаун|спавн)[^\w]*$", re.IGNORECASE)
 
 
 def mentions_bot(text: str, username: str | None) -> bool:

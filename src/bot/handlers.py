@@ -266,7 +266,7 @@ async def on_delete_confirm(
         # Not stored yet and no session_id: drop it locally with no Kiro call (15.2).
         services.pending.pop(user_id, None)
         if query.message is not None:
-            await query.message.answer("Сессия удалена.")
+            await query.message.answer("Беседа удалена.")
         return
     await services.dispatcher.submit(DeleteJob(user_id, callback_data.sid))
 
