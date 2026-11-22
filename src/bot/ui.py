@@ -59,6 +59,13 @@ CONTEXT_PENDING = "Сессия «{name}» ещё не создана. Запо�
 CONTEXT_FULL_NOTE = "Сессия заполнена: обычные сообщения не принимаются. Сделайте выжимку или начните новую беседу."
 
 
+GROUP_NEW_TEXT = "Новая беседа начата. Следующее сообщение начнёт её."
+GROUP_CLEARED_TEXT = "Контекст очищен. Следующее сообщение начнёт новую беседу."
+GROUP_FULL_TEXT = (
+    "Сессия заполнена, сообщения сейчас не принимаются. "
+    "Нажмите «Очистить контекст», чтобы начать новую беседу."
+)
+
 def button(text: str, data: CallbackData) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data.pack())
 
@@ -76,6 +83,10 @@ def options_markup(show_summarize: bool = True) -> InlineKeyboardMarkup:
     rows.append([button("Список сессий", MenuCb(action="list"))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+def clear_markup() -> InlineKeyboardMarkup:
+    """Single Clear button shown in groups, where summaries are not offered."""
+    return InlineKeyboardMarkup(inline_keyboard=[[button("Очистить контекст", MenuCb(action="clear"))]])
 
 def session_list_markup(page: Page, names: dict[str, str]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
@@ -126,12 +137,9 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="context", description="Заполненность контекста"),
 ]
 START_TEXT = (
-    "Здесь ваши сообщения передаются в kiro-cli. Каждая сессия хранит свою беседу.\n"
-    "/new — новая беседа\n"
-    "/sessions — список сессий\n"
-    "/summary — выжимка в новую сессию\n"
-    "/context — заполненность контекста\n"
-    "Кнопки команд — внизу экрана."
+    "Тьма учила меня говорить громко, но в личных разговорах хватает и тихих слов. "
+    "Ты написал напрямую, значит, дело у тебя не для всех. "
+    "Говори, что нужно, без предисловий. Я выслушаю и отвечу честно."
 )
 
 
