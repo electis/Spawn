@@ -16,6 +16,7 @@ from bot.kiro_parser import RunResult
 from bot.models import SessionRecord
 from bot.session_store import SessionStore
 from bot.summary import SUMMARY_PROMPT
+from bot.persona import first_message
 
 OK_RESULT = RunResult("sess_11111111", "reply", None, None)
 
@@ -47,18 +48,18 @@ class FakeNotifier:
         self.choices = []
         self.summaries = []
 
-    async def send_text(self, user_id, text):
+    async def send_text(self, user_id, text, reply_to=None):
         self.texts.append((user_id, text))
 
-    async def send_reply(self, user_id, chunks, display, choice=None):
+    async def send_reply(self, user_id, chunks, display, choice=None, reply_to=None, group=False):
         self.replies.append((user_id, chunks, display))
         self.choices.append(choice)
 
     async def send_summary(self, user_id, text, old_sid):
         self.summaries.append((user_id, text, old_sid))
 
-    async def send_full_options(self, user_id):
-        self.texts.append((user_id, "full"))
+    async def send_blocked(self, job):
+        self.texts.append((job.user_id, "full"))
 
 
 def test_summary_success_stores_old_usage_and_hands_text_over(tmp_path):
@@ -276,7 +277,7 @@ def test_first_reply_stores_pending_session_and_activates_it(tmp_path):
     assert [s.name for s in user.sessions] == ["New one"]
     assert user.sessions[0].session_id == "sess_99999999"
     assert user.active_sid == "cccccccc"
-    assert runner.prompts == [(None, "hi")]  # a new Session has no --resume-id
+    assert runner.prompts == [(None, first_message("hi"))]  # a new Session has no --resume-id
 
 
 # Feature: telegram-kiro-bot, Property 17: Delete changes the store only on confirmed success

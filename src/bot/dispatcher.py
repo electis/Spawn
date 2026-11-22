@@ -1,4 +1,4 @@
-"""Per-User job queue (Requirements 8.1 to 8.3, 10.15).
+﻿"""Per-User job queue (Requirements 8.1 to 8.3, 10.15).
 
 One asyncio worker and one FIFO queue per User. Workers for different Users run in parallel.
 A job is removed from the User's queue only after it finishes, so jobs for one User never overlap.
@@ -17,11 +17,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TextJob:
-    user_id: int
+    user_id: int  # owner key (bot/scope.py): the User id in private chats
     sid: str  # Session bound at submit time; may be a pending (not yet stored) Session
     text: str
     pending_name: str | None = None  # set when the Session is new and not yet stored
     summary_of: str | None = None  # old Session sid when this new Session comes from a summary
+    chat_id: int | None = None  # group to answer in; None means the private chat with user_id
+    reply_to: int | None = None  # group message to reply to
+
+    @property
+    def target_chat(self) -> int:
+        return self.user_id if self.chat_id is None else self.chat_id
 
 
 @dataclass(frozen=True)
@@ -29,18 +35,26 @@ class SummaryJob:
     user_id: int
     sid: str  # the Active_Session at tap time
 
+    @property
+    def target_chat(self) -> int:
+        return self.user_id
+
 
 @dataclass(frozen=True)
 class DeleteJob:
     user_id: int
     sid: str
 
+    @property
+    def target_chat(self) -> int:
+        return self.user_id
+
 
 Job = TextJob | SummaryJob | DeleteJob
 JobHandler = Callable[[Job], Awaitable[None]]
 BlockCheck = Callable[[TextJob], bool]
 BlockedHandler = Callable[[TextJob], Awaitable[None]]
-TypingHandler = Callable[[int], Awaitable[None]]  # sends a "typing" chat action to a user
+TypingHandler = Callable[[int], Awaitable[None]]  # sends a "typing" chat action to a chat
 
 
 class UserDispatcher:
@@ -83,7 +97,7 @@ class UserDispatcher:
         if self._show_typing is None:
             await self._handle(job)
             return
-        typing = asyncio.create_task(self._typing_loop(job.user_id))
+        typing = asyncio.create_task(self._typing_loop(job.target_chat))
         try:
             await self._handle(job)
         finally:
@@ -91,12 +105,12 @@ class UserDispatcher:
             with suppress(asyncio.CancelledError):
                 await typing
 
-    async def _typing_loop(self, user_id: int) -> None:
+    async def _typing_loop(self, chat_id: int) -> None:
         # Telegram shows a typing action for about 5 seconds, so it is refreshed every 4.
         assert self._show_typing is not None
         while True:
             try:
-                await self._show_typing(user_id)
+                await self._show_typing(chat_id)
             except Exception as exc:  # noqa: BLE001 - a missing indicator must not fail the job
                 logger.debug("typing action failed: %s", type(exc).__name__)
             await asyncio.sleep(self._typing_interval)

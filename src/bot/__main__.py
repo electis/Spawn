@@ -1,4 +1,4 @@
-"""Entry point: load config and secrets, build the services, and start aiogram polling."""
+﻿"""Entry point: load config and secrets, build the services, and start aiogram polling."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from bot.credentials import CredentialError, load_token
 from bot.dispatcher import UserDispatcher
 from bot.envfile import EnvFileError, parse_env_file
 from bot.gate import ContextGate
+from bot.group_handlers import group_router
 from bot.groups import GroupRegistry, GroupsError
 from bot.handlers import router
 from bot.jobs import JobProcessor
@@ -64,6 +65,7 @@ async def run() -> int:
         return 1
 
     bot = Bot(token=token)
+    me = await bot.get_me()
     storage = MemoryStorage()
     checker = MembershipChecker(bot, groups.allowed_ids, ttl=config.membership_ttl_seconds)
     runner = KiroRunner(config.kiro_bin, kiro_env, config.workdir_root)
@@ -73,7 +75,7 @@ async def run() -> int:
     dispatcher = UserDispatcher(
         processor.handle,
         is_blocked=gate.blocks,
-        on_blocked=lambda job: notifier.send_full_options(job.user_id),
+        on_blocked=notifier.send_blocked,
         show_typing=notifier.send_typing,
     )
     services = Services(
@@ -83,13 +85,18 @@ async def run() -> int:
         groups=groups,
         membership=checker,
         admin_username=admin_username,
+        bot_id=me.id,
+        bot_username=me.username,
     )
 
     dp = Dispatcher(storage=storage)
-    membership = PrivateMembershipMiddleware(checker, admin_username=admin_username)
+    membership = PrivateMembershipMiddleware(
+        checker, admin_username=admin_username, group_open=services.group_is_open
+    )
     dp.message.outer_middleware(membership)
     dp.callback_query.outer_middleware(membership)
     dp.include_router(admin_router)
+    dp.include_router(group_router)
     dp.include_router(router)
 
     await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats())

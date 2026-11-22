@@ -18,6 +18,7 @@ from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from aiogram.types import ChatMemberLeft, ChatMemberMember, ChatMemberUpdated, MessageEntity
 
 from bot import ui
+from bot.persona import first_message
 from bot.admin import GroupCb, admin_router
 from bot.groups import GroupRegistry
 from bot.middleware import REFUSAL_TEXT
@@ -100,7 +101,7 @@ def _services(tmp_path: Path, results=()) -> tuple[Services, FakeRunner]:
     dispatcher = UserDispatcher(
         processor.handle,
         is_blocked=gate.blocks,
-        on_blocked=lambda job: notifier.send_full_options(job.user_id),
+        on_blocked=notifier.send_blocked,
     )
     groups = GroupRegistry(tmp_path / "groups.json")
     groups.load()
@@ -200,7 +201,7 @@ def test_new_conversation_round_trip(tmp_path):
     assert runner.prompts == []  # the name alone sends no request
 
     asyncio.run(_feed(_text_update(uid, "Привет"), services))
-    assert runner.prompts == [(None, "Привет")]
+    assert runner.prompts == [(None, first_message("Привет"))]
     assert "ответ" in _sent()
     user = services.store.get_user(uid)
     assert [s.name for s in user.sessions] == ["Проект"]
@@ -267,7 +268,7 @@ def test_summary_flow_end_to_end(tmp_path):
     assert runner.prompts[0][0] == "sess_0000aaaa"  # summary goes to the old Session
 
     asyncio.run(_feed(_text_update(uid, "Новая"), services))
-    assert runner.prompts[1] == (None, "Выжимка: факты")  # new Session, no --resume-id
+    assert runner.prompts[1] == (None, first_message("Выжимка: факты"))  # new Session, no --resume-id
     assert [s.name for s in services.store.get_user(uid).sessions] == ["Old", "Новая"]
     assert ui.CHOICE_TEXT in _sent()
     assert "Ответ в новой сессии" in _sent()

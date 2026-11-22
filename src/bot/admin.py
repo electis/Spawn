@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, Filter
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import (
@@ -30,6 +30,11 @@ ALLOWED_TEXT = "Группа разрешена."
 DENIED_TEXT = "Группа запрещена."
 NOT_IN_GROUP = "Бот не состоит в этой группе, разрешить её нельзя."
 UNKNOWN_GROUP = "Группа не найдена."
+GREETING_TEXT = (
+    "Тьма дала мне имя, громкое и тяжёлое, как цепи. Свет не стал спорить с ним. "
+    "Он пришёл тихо и занял место в сердце. Победа ждала меня, а мне оставалось только принять её.\n\n"
+    "Зови меня Спаун."
+)
 
 
 class GroupCb(CallbackData, prefix="g"):
@@ -106,8 +111,12 @@ async def on_group_toggle(
 
 
 @admin_router.my_chat_member()
-async def on_my_chat_member(event: ChatMemberUpdated, services: Services) -> None:
+async def on_my_chat_member(event: ChatMemberUpdated, services: Services, bot: Bot) -> None:
     if event.chat.type not in {"group", "supergroup"} or services.groups is None:
         return
     present = event.new_chat_member.status in PRESENT_STATUSES
+    was_present = event.old_chat_member.status in PRESENT_STATUSES
     services.groups.record_membership(event.chat.id, event.chat.title or "", present)
+    # Greet only when the bot joins. Promotions and removals send nothing.
+    if present and not was_present:
+        await bot.send_message(event.chat.id, GREETING_TEXT)

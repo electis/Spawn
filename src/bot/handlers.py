@@ -16,7 +16,7 @@ from bot.context_display import is_full
 from bot.dispatcher import DeleteJob, SummaryJob, TextJob
 from bot.pagination import page_of
 from bot.names import validate_session_name
-from bot.state import PendingSession, Services, SessionNameStates
+from bot.state import PendingSession, Services, SessionNameStates, active_sid
 from bot.ui import (
     ASK_NAME,
     CANCELLED,
@@ -49,20 +49,7 @@ from bot.ui import (
 router = Router(name="kiro-bot")
 
 
-def _reconcile_pending(services: Services, user_id: int) -> PendingSession | None:
-    """Drop the pending Session once the first reply has stored it."""
-    pending = services.pending.get(user_id)
-    if pending is not None and services.store.find_session(user_id, pending.sid) is not None:
-        services.pending.pop(user_id, None)
-        return None
-    return pending
-
-
-def _active_sid(services: Services, user_id: int) -> str | None:
-    pending = _reconcile_pending(services, user_id)
-    if pending is not None:
-        return pending.sid
-    return services.store.get_user(user_id).active_sid
+_active_sid = active_sid
 
 
 def _list_names(services: Services, user_id: int) -> list[str]:
