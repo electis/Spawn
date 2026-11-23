@@ -52,6 +52,18 @@ router = Router(name="kiro-bot")
 _active_sid = active_sid
 
 
+def _ensure_first_session(services: Services, user_id: int) -> bool:
+    """Open a pending conversation for a User who has none yet. Returns True when one was opened.
+
+    Users with existing conversations are not changed, so an empty list still shows NO_ACTIVE.
+    """
+    if services.store.get_user(user_id).sessions or _active_sid(services, user_id) is not None:
+        return False
+    sid = secrets.token_hex(4)
+    services.pending[user_id] = PendingSession(sid=sid, name=f"Беседа {sid}")
+    return True
+
+
 def _list_names(services: Services, user_id: int) -> list[str]:
     return [s.name for s in services.store.get_user(user_id).sessions]
 
@@ -99,7 +111,8 @@ async def on_session_name(message: Message, state: FSMContext, services: Service
 
 
 @router.message(Command("start"))
-async def on_command_start(message: Message) -> None:
+async def on_command_start(message: Message, services: Services) -> None:
+    _ensure_first_session(services, message.from_user.id)
     await message.answer(START_TEXT, reply_markup=commands_keyboard())
 
 
@@ -149,8 +162,10 @@ async def on_text(message: Message, services: Services) -> None:
     user_id = message.from_user.id
     sid = _active_sid(services, user_id)
     if sid is None:
-        await message.answer(NO_ACTIVE, reply_markup=options_markup(show_summarize=False))
-        return
+        if not _ensure_first_session(services, user_id):
+            await message.answer(NO_ACTIVE, reply_markup=options_markup(show_summarize=False))
+            return
+        sid = _active_sid(services, user_id)
 
     pending = services.pending.get(user_id)
     if pending is not None and pending.sid == sid:

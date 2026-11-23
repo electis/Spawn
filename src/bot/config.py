@@ -10,6 +10,7 @@ from bot.envfile import DEFAULT_ENV_FILE
 
 DEFAULT_CONFIG_PATH = Path("/etc/kiro-bot/bot.toml")
 DEFAULT_MEMBERSHIP_TTL_SECONDS = 300  # Assumption A-8
+DEFAULT_ACP_HOME = Path("/root/spawn-acp-home")  # HOME for kiro-cli: holds the model choice
 
 
 class ConfigError(Exception):
@@ -25,6 +26,7 @@ class BotConfig:
     env_file: Path  # holds TELEGRAM_BOT_TOKEN, KIRO_API_KEY, and ADMIN_USERNAME, mode 0600
     membership_ttl_seconds: float
     groups_path: Path  # allowed-groups registry, managed by the admin
+    acp_home: Path = DEFAULT_ACP_HOME  # kiro-cli HOME for ACP processes; chat.defaultModel lives here
 
 
 def _is_int(value: object) -> bool:
@@ -56,6 +58,7 @@ def parse_config(text: str) -> BotConfig:
             groups_path=Path(
                 data.get("groups_path", Path(data["store_path"]).parent / "groups.json")
             ),
+            acp_home=Path(data.get("acp_home", DEFAULT_ACP_HOME)),
         )
     except KeyError as exc:
         raise ConfigError(f"missing required key: {exc.args[0]}") from exc

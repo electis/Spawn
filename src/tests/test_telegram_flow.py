@@ -18,6 +18,7 @@ from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from aiogram.types import ChatMemberLeft, ChatMemberMember, ChatMemberUpdated, MessageEntity
 
 from bot import ui
+from bot.admin import GROUPS_TITLE
 from bot.persona import first_message
 from bot.admin import GroupCb, admin_router
 from bot.groups import GroupRegistry
@@ -180,12 +181,12 @@ def test_non_member_is_refused_without_kiro(tmp_path):
     assert runner.prompts == []
 
 
-def test_text_without_active_session_asks_to_open_one(tmp_path):
+def test_first_text_opens_a_conversation_automatically(tmp_path):
     services, runner = _services(tmp_path)
     SESSION.member_status = "member"
     asyncio.run(_feed(_text_update(next(_ids), "hi"), services))
-    assert _sent() == [ui.NO_ACTIVE]
-    assert runner.prompts == []
+    assert ui.NO_ACTIVE not in _sent()
+    assert [text for _, text in runner.prompts] == [first_message("hi")]  # first message of a new Session
 
 
 def test_new_conversation_round_trip(tmp_path):
@@ -349,8 +350,8 @@ def test_non_admin_admin_command_is_ordinary_text(tmp_path):
     services, runner = _services(tmp_path)
     SESSION.member_status = "member"
     asyncio.run(_feed(_admin_message("/admin", username="someone"), services))
-    assert _sent() == [ui.NO_ACTIVE]  # no admin list is shown
-    assert runner.prompts == []
+    assert GROUPS_TITLE not in _sent()  # no admin list is shown
+    assert [text for _, text in runner.prompts] == [first_message("/admin")]  # ordinary text
 
 
 def test_non_admin_cannot_toggle_group(tmp_path):

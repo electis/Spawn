@@ -1,4 +1,4 @@
-﻿"""Entry point: load config and secrets, build the services, and start aiogram polling."""
+"""Entry point: load config and secrets, build the services, and start aiogram polling."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ async def run() -> int:
     me = await bot.get_me()
     storage = MemoryStorage()
     checker = MembershipChecker(bot, groups.allowed_ids, ttl=config.membership_ttl_seconds)
-    runner = KiroRunner(config.kiro_bin, kiro_env, config.workdir_root)
+    runner = KiroRunner(config.kiro_bin, kiro_env, config.workdir_root, acp_home=config.acp_home)
     notifier = AiogramNotifier(bot, storage)
     processor = JobProcessor(store, runner, notifier)
     gate = ContextGate(store)
@@ -101,11 +101,14 @@ async def run() -> int:
 
     await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeAllPrivateChats())
 
-    await dp.start_polling(
-        bot,
-        services=services,
-        allowed_updates=["message", "callback_query", "my_chat_member"],
-    )
+    try:
+        await dp.start_polling(
+            bot,
+            services=services,
+            allowed_updates=["message", "callback_query", "my_chat_member"],
+        )
+    finally:
+        await runner.close()
     return 0
 
 

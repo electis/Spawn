@@ -1,22 +1,16 @@
-"""Parser for `kiro-cli chat --v3 --output-format stream-json` (design D-1).
+"""Result type for one kiro-cli prompt, and the context usage helper.
 
-Verified shapes (amster, kiro-cli 3.5.0):
-- Each line is one JSON object: {"type": ..., "data": {...}}.
-- Session ID: data.sessionId on sessionUpdate and runFinished events.
-- Reply: runFinished.data.finalText.
-- Context usage is carried by sessionUpdate events under update._meta.kiro:
-  * primary: kiro.kind == "context_usage" and kiro.usagePercentage
-  * fallback: kiro.contextUsage.usagePercentage
-  Values are percent points (0.79 means 0.79%).
+Context usage is carried by session updates under update._meta.kiro, in two shapes:
+- primary: kiro.kind == "context_usage" and kiro.usagePercentage
+- fallback: kiro.contextUsage.usagePercentage
+Values are percent points as reported by kiro-cli (0.79 means 0.79%). Design D-1.
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-
 
 NO_FINAL_TEXT = "kiro-cli returned no final text"
 
@@ -25,7 +19,7 @@ NO_FINAL_TEXT = "kiro-cli returned no final text"
 class RunResult:
     session_id: str | None
     final_text: str | None
-    context_usage: float | None  # None when neither usage source appeared in the stream
+    context_usage: float | None  # None when neither usage source appeared
     error: str | None
     refused: bool = False  # the model refused to answer (stopReason refusal)
 
@@ -36,7 +30,7 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
-def _usage_from_meta(meta: Any) -> tuple[float | None, float | None]:
+def usage_from_meta(meta: Any) -> tuple[float | None, float | None]:
     """Return (primary, fallback) usage values found in one update's _meta."""
     if not isinstance(meta, Mapping):
         return None, None
@@ -49,69 +43,3 @@ def _usage_from_meta(meta: Any) -> tuple[float | None, float | None]:
     nested = kiro.get("contextUsage")
     fallback = _number(nested.get("usagePercentage")) if isinstance(nested, Mapping) else None
     return primary, fallback
-
-
-def parse_stream(lines: Iterable[str]) -> RunResult:
-    session_id: str | None = None
-    final_text: str | None = None
-    run_status: str | None = None
-    run_reason: str | None = None
-    run_error: str | None = None
-    primary_usage: float | None = None
-    fallback_usage: float | None = None
-
-    for raw in lines:
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            event = json.loads(raw)
-        except ValueError:
-            continue  # kiro-cli may print non-JSON text; only JSON events count
-        if not isinstance(event, Mapping):
-            continue
-        kind = event.get("type")
-        data = event.get("data")
-        if not isinstance(data, Mapping):
-            continue
-
-        if kind == "sessionUpdate":
-            sid = data.get("sessionId")
-            if session_id is None and isinstance(sid, str):
-                session_id = sid
-            update = data.get("update")
-            if isinstance(update, Mapping):
-                primary, fallback = _usage_from_meta(update.get("_meta"))
-                if primary is not None:
-                    primary_usage = primary
-                if fallback is not None:
-                    fallback_usage = fallback
-        elif kind == "runFinished":
-            sid = data.get("sessionId")
-            if isinstance(sid, str):
-                session_id = sid
-            text = data.get("finalText")
-            final_text = text if isinstance(text, str) else None
-            reason = data.get("stopReason")
-            run_reason = reason if isinstance(reason, str) else None
-            status = data.get("status")
-            run_status = status if isinstance(status, str) else None
-        elif kind == "runError":
-            message = data.get("message") or data.get("error") or "kiro-cli reported an error"
-            run_error = str(message)
-
-    usage = primary_usage if primary_usage is not None else fallback_usage
-
-    if run_error is not None:
-        return RunResult(session_id, None, usage, run_error)
-    if final_text is None:
-        return RunResult(session_id, None, usage, NO_FINAL_TEXT)
-    if run_status is not None and run_status != "success":
-        if run_reason == "refusal":
-            message = "модель отказалась ответить на этот запрос"
-        else:
-            message = f"kiro-cli run status {run_status}, stop reason {run_reason or "unknown"}"
-        if final_text:
-            message += f". Текст kiro-cli: {final_text}"
-        return RunResult(session_id, None, usage, message, refused=run_reason == "refusal")
-    return RunResult(session_id, final_text, usage, None)

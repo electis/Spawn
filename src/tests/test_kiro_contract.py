@@ -1,236 +1,311 @@
-"""kiro-cli contract tests: parser shapes (Property 5), argv (Property 7), stdin only (Property 4).
+"""kiro-cli ACP contract tests, run against tests/fake_acp.py (no network, no real kiro-cli).
 
-Shapes are the ones recorded from kiro-cli 3.5.0 on amster.
+Each test runs its whole scenario inside one event loop, as the bot does: the kiro-cli process
+and its reader task belong to that loop.
 """
 
 import asyncio
 import json
+import os
+import sys
 from pathlib import Path
 
-import hypothesis.strategies as st
 import pytest
-from hypothesis import given, settings
 
-from bot.kiro_parser import parse_stream
-from bot.kiro_runner import KiroRunner, build_argv
-from tests.fake_kiro import fake_env, make_fake_kiro
+from bot.kiro_parser import NO_FINAL_TEXT, usage_from_meta
+from bot.kiro_runner import REFUSAL_MESSAGE, KiroRunner
+from tests.fake_acp import __file__ as FAKE_PATH
 
-SESSION = "sess_3a313626-195f-4084-b687-bfa7b59d072a"
-
-SESSION_UPDATE_PRIMARY = {
-    "type": "sessionUpdate",
-    "data": {
-        "sessionId": SESSION,
-        "update": {
-            "sessionUpdate": "session_info_update",
-            "_meta": {"kiro": {"kind": "context_usage", "usagePercentage": 1.25}},
-        },
-    },
-}
-SESSION_UPDATE_FALLBACK = {
-    "type": "sessionUpdate",
-    "data": {
-        "sessionId": SESSION,
-        "update": {
-            "sessionUpdate": "session_info_update",
-            "_meta": {"kiro": {"contextUsage": {"usagePercentage": 0.7859}}},
-        },
-    },
-}
-RUN_FINISHED = {
-    "type": "runFinished",
-    "data": {"sessionId": SESSION, "status": "success", "finalText": "OK"},
-}
+FAKE = str(Path(FAKE_PATH).resolve())
 
 
-def _lines(*events):
-    return [json.dumps(e) for e in events]
+def _runner(tmp_path: Path, mode: str = "normal", acp_home=None, **kwargs) -> tuple[KiroRunner, Path]:
+    log = tmp_path / "events.jsonl"
+    env = {**os.environ, "FAKE_LOG": str(log), "FAKE_MODE": mode}
+    runner = KiroRunner(
+        sys.executable,
+        env,
+        tmp_path / "workdirs",
+        acp_home=acp_home,
+        acp_args=(FAKE,),
+        **kwargs,
+    )
+    return runner, log
 
 
-def test_primary_usage_wins_over_fallback():
-    result = parse_stream(_lines(SESSION_UPDATE_FALLBACK, SESSION_UPDATE_PRIMARY, RUN_FINISHED))
-    assert result.context_usage == 1.25
-    assert result.session_id == SESSION
-    assert result.final_text == "OK"
+def _events(log: Path) -> list[dict]:
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+
+def _requests(log: Path, method: str) -> list[dict]:
+    return [e["params"] for e in _events(log) if e["event"] == "request" and e["method"] == method]
+
+
+def _starts(log: Path) -> int:
+    return len([e for e in _events(log) if e["event"] == "start"])
+
+
+# ---- usage parsing --------------------------------------------------------------------
+
+
+def test_primary_usage_shape():
+    meta = {"kiro": {"kind": "context_usage", "usagePercentage": 1.25}}
+    assert usage_from_meta(meta) == (1.25, None)
+
+
+def test_fallback_usage_shape():
+    meta = {"kiro": {"contextUsage": {"usagePercentage": 0.7859}}}
+    assert usage_from_meta(meta) == (None, 0.7859)
+
+
+@pytest.mark.parametrize("meta", [None, {}, {"kiro": "x"}, {"kiro": {"kind": "context_usage", "usagePercentage": True}}])
+def test_unusable_usage_is_ignored(meta):
+    assert usage_from_meta(meta)[0] is None
+
+
+# ---- prompts --------------------------------------------------------------------------
+
+
+def test_new_session_returns_id_text_and_usage(tmp_path):
+    async def scenario():
+        runner, _ = _runner(tmp_path)
+        try:
+            return await runner.run_prompt(runner.workdir_for(1), None, "привет")
+        finally:
+            await runner.close()
+
+    result = asyncio.run(scenario())
     assert result.error is None
+    assert result.session_id.startswith("sess_")
+    assert result.final_text == "Ответ: привет"
+    assert result.context_usage == 1.25
+    assert result.refused is False
 
 
-def test_fallback_used_when_primary_absent():
-    result = parse_stream(_lines(SESSION_UPDATE_FALLBACK, RUN_FINISHED))
-    assert result.context_usage == pytest.approx(0.7859)
+def test_text_is_sent_in_the_prompt(tmp_path):
+    secret_like = "пароль: 12345 --trust-tools=*"
+
+    async def scenario():
+        runner, log = _runner(tmp_path)
+        try:
+            await runner.run_prompt(runner.workdir_for(1), None, secret_like)
+        finally:
+            await runner.close()
+        return log
+
+    log = asyncio.run(scenario())
+    (prompt,) = _requests(log, "session/prompt")
+    assert prompt["prompt"] == [{"type": "text", "text": secret_like}]
 
 
-def test_no_usage_gives_none():
-    result = parse_stream(_lines(RUN_FINISHED))
-    assert result.context_usage is None and result.final_text == "OK"
+def test_working_directory_is_the_session_cwd(tmp_path):
+    async def scenario():
+        runner, log = _runner(tmp_path)
+        workdir = runner.workdir_for(7)
+        try:
+            await runner.run_prompt(workdir, None, "hi")
+        finally:
+            await runner.close()
+        return workdir, log
+
+    workdir, log = asyncio.run(scenario())
+    (new,) = _requests(log, "session/new")
+    assert new["cwd"] == str(workdir)
 
 
-def test_missing_final_text_is_an_error():
-    event = {"type": "runFinished", "data": {"sessionId": SESSION, "status": "success"}}
-    result = parse_stream(_lines(event))
-    assert result.final_text is None and result.error
+def test_process_is_reused_between_messages(tmp_path):
+    async def scenario():
+        runner, log = _runner(tmp_path)
+        workdir = runner.workdir_for(2)
+        try:
+            first = await runner.run_prompt(workdir, None, "один")
+            second = await runner.run_prompt(workdir, first.session_id, "два")
+        finally:
+            await runner.close()
+        return second, log
+
+    second, log = asyncio.run(scenario())
+    assert _starts(log) == 1
+    assert second.final_text == "Ответ: два"
+    assert _requests(log, "session/load") == []  # already open in this process
 
 
-def test_run_error_is_reported():
-    event = {"type": "runError", "data": {"message": "boom"}}
-    result = parse_stream(_lines(event))
-    assert result.error == "boom" and result.final_text is None
+def test_stored_session_is_reopened_with_session_load(tmp_path):
+    async def scenario():
+        runner, log = _runner(tmp_path)
+        workdir = runner.workdir_for(3)
+        try:
+            result = await runner.run_prompt(workdir, "sess_0000abcd", "вспомни")
+        finally:
+            await runner.close()
+        return workdir, result, log
+
+    workdir, result, log = asyncio.run(scenario())
+    (load,) = _requests(log, "session/load")
+    assert load["sessionId"] == "sess_0000abcd"
+    assert load["cwd"] == str(workdir)
+    assert result.session_id == "sess_0000abcd"
+    assert result.final_text == "Ответ: вспомни"
 
 
-def test_non_json_lines_are_skipped():
-    result = parse_stream(["noise", ""] + _lines(RUN_FINISHED))
-    assert result.final_text == "OK"
+def test_unknown_session_is_reported_not_silently_replaced(tmp_path):
+    async def scenario():
+        runner, _ = _runner(tmp_path)
+        try:
+            # The fake rejects ids that do not start with sess_, so session/load fails.
+            return await runner.run_prompt(runner.workdir_for(4), "9f3c" + "0" * 36, "hi")
+        finally:
+            await runner.close()
 
-
-def test_boolean_usage_is_ignored():
-    event = {
-        "type": "sessionUpdate",
-        "data": {
-            "sessionId": SESSION,
-            "update": {"_meta": {"kiro": {"kind": "context_usage", "usagePercentage": True}}},
-        },
-    }
-    assert parse_stream(_lines(event, RUN_FINISHED)).context_usage is None
-
-
-def test_argv_without_session():
-    argv = build_argv(None)
-    assert "--resume-id" not in argv
-    assert argv[:3] == ["chat", "--v3", "--no-interactive"]
-    assert "claude-haiku-5.5" in argv
-
-
-def test_argv_trusts_no_tools():
-    argv = build_argv(None)
-    assert "--trust-tools=" in argv
-    assert not any(a.startswith("--trust-all") or a == "-a" for a in argv)
-
-
-def test_argv_with_session():
-    argv = build_argv(SESSION)
-    assert argv[-2:] == ["--resume-id", SESSION]
-
-
-@pytest.mark.parametrize("bad", ["sess_;rm", "../x", "--help", "", "SESS_UPPER"])
-def test_invalid_session_id_is_rejected(bad):
-    with pytest.raises(ValueError):
-        build_argv(bad)
-
-
-def _run(tmp_path: Path, text: str, session_id=None, **extra_env):
-    fake = make_fake_kiro(tmp_path)
-    env = fake_env(tmp_path, out_text="\n".join(_lines(RUN_FINISHED)) + "\n", **extra_env)
-    runner = KiroRunner(str(fake), env, tmp_path / "workdirs", timeout=10)
-    workdir = runner.workdir_for(7)
-    result = asyncio.run(runner.run_prompt(workdir, session_id, text))
-    log = json.loads(Path(env["FAKE_LOG"]).read_text(encoding="utf-8"))
-    return result, log
-
-
-# Feature: telegram-kiro-bot, Property 4: User text reaches kiro-cli only through stdin
-@settings(max_examples=25, deadline=None)
-@given(
-    text=st.text(alphabet=st.characters(blacklist_categories=("Cs",)), min_size=1, max_size=80)
-)
-def test_text_goes_only_through_stdin(tmp_path_factory, text):
-    tmp_path = tmp_path_factory.mktemp("run")
-    result, log = _run(tmp_path, text)
-    assert result.final_text == "OK"
-    assert log["stdin"] == text
-    assert text not in log["argv"]  # the text itself is never an argument
-
-
-# Feature: telegram-kiro-bot, Property 7: Resume argument matches the stored Session_ID
-def test_resume_argument_is_passed_for_stored_session(tmp_path):
-    _, log = _run(tmp_path, "hi", session_id=SESSION)
-    assert log["argv"][-2:] == ["--resume-id", SESSION]
-
-
-def test_new_session_has_no_resume_argument(tmp_path):
-    _, log = _run(tmp_path, "hi", session_id=None)
-    assert "--resume-id" not in log["argv"]
-
-
-def test_workdir_is_used_as_cwd(tmp_path):
-    _, log = _run(tmp_path, "hi")
-    assert Path(log["cwd"]).name == "7"
-
-
-def test_non_zero_exit_is_an_error_without_stderr(tmp_path):
-    result, _ = _run(tmp_path, "hi", FAKE_RC="3")
+    result = asyncio.run(scenario())
     assert result.final_text is None
-    assert result.error == "kiro-cli exited with code 3"
+    assert result.error
 
 
-def test_timeout_kills_and_reports(tmp_path):
-    fake = make_fake_kiro(tmp_path)
-    env = fake_env(tmp_path, out_text="", FAKE_SLEEP="5")
-    runner = KiroRunner(str(fake), env, tmp_path / "workdirs", timeout=0.5)
-    result = asyncio.run(runner.run_prompt(runner.workdir_for(1), None, "hi"))
-    assert result.error == "kiro-cli timed out"
+def test_invalid_session_id_is_rejected_before_any_process(tmp_path):
+    async def scenario():
+        runner, log = _runner(tmp_path)
+        try:
+            return await runner.run_prompt(runner.workdir_for(5), "rm -rf /", "hi"), log
+        finally:
+            await runner.close()
+
+    result, log = asyncio.run(scenario())
+    assert result.error == "invalid session id"
+    assert _events(log) == []
 
 
-def test_delete_success_and_failure(tmp_path):
-    fake = make_fake_kiro(tmp_path)
-    env = fake_env(tmp_path)
-    runner = KiroRunner(str(fake), env, tmp_path / "workdirs", timeout=10)
-    workdir = runner.workdir_for(1)
-    assert asyncio.run(runner.delete_session(workdir, SESSION)) is None
+def test_refusal_is_reported_with_reason(tmp_path):
+    async def scenario():
+        runner, _ = _runner(tmp_path, mode="refusal")
+        try:
+            return await runner.run_prompt(runner.workdir_for(6), None, "опасное")
+        finally:
+            await runner.close()
 
-    env_bad = fake_env(tmp_path, FAKE_DELETE_RC="4")
-    bad = KiroRunner(str(fake), env_bad, tmp_path / "workdirs", timeout=10)
-    assert asyncio.run(bad.delete_session(workdir, SESSION)) == "kiro-cli delete exited with code 4"
-
-
-def test_delete_rejects_bad_session_id_without_running(tmp_path):
-    fake = make_fake_kiro(tmp_path)
-    runner = KiroRunner(str(fake), fake_env(tmp_path), tmp_path / "workdirs", timeout=10)
-    error = asyncio.run(runner.delete_session(runner.workdir_for(1), "bad id"))
-    assert error == "invalid session id"
-    assert not (tmp_path / "log.json").exists()
-
-
-REFUSAL_RUN = {
-    "type": "runFinished",
-    "data": {
-        "sessionId": SESSION,
-        "status": "error",
-        "stopReason": "refusal",
-        "finalText": "The selected model cannot continue this conversation.",
-    },
-}
-
-
-def test_refusal_is_reported_with_reason_and_session():
-    result = parse_stream(_lines(REFUSAL_RUN))
+    result = asyncio.run(scenario())
+    assert result.refused is True
+    assert result.error == REFUSAL_MESSAGE
     assert result.final_text is None
-    assert result.session_id == SESSION
-    assert "отказалась" in result.error
-    assert "cannot continue" in result.error
 
 
-def test_refusal_exit_code_keeps_reason(tmp_path):
-    out = "\n".join(_lines(REFUSAL_RUN)) + "\n"
-    fake = make_fake_kiro(tmp_path)
-    env = fake_env(tmp_path, out_text=out, FAKE_RC="1")
-    runner = KiroRunner(str(fake), env, tmp_path / "workdirs", timeout=10)
-    result = asyncio.run(runner.run_prompt(runner.workdir_for(3), None, "hi"))
-    assert result.error is not None
-    assert "отказалась" in result.error
-    assert "exited with code" not in result.error
+def test_empty_reply_is_an_error(tmp_path):
+    async def scenario():
+        runner, _ = _runner(tmp_path, mode="empty")
+        try:
+            return await runner.run_prompt(runner.workdir_for(8), None, "тишина")
+        finally:
+            await runner.close()
+
+    result = asyncio.run(scenario())
+    assert result.error == NO_FINAL_TEXT
+    assert result.refused is False
 
 
-def test_exit_code_without_stream_reason_is_still_an_error(tmp_path):
-    fake = make_fake_kiro(tmp_path)
-    env = fake_env(tmp_path, out_text="", FAKE_RC="2")
-    runner = KiroRunner(str(fake), env, tmp_path / "workdirs", timeout=10)
-    result = asyncio.run(runner.run_prompt(runner.workdir_for(3), None, "hi"))
-    assert result.error == "kiro-cli exited with code 2"
+def test_timeout_is_reported_and_next_message_restarts_kiro(tmp_path):
+    async def scenario():
+        runner, log = _runner(tmp_path, mode="hang", timeout=0.5)
+        workdir = runner.workdir_for(9)
+        try:
+            first = await runner.run_prompt(workdir, None, "долго")
+            runner._env["FAKE_MODE"] = "normal"  # the next process answers normally
+            second = await runner.run_prompt(workdir, None, "снова")
+        finally:
+            await runner.close()
+        return first, second, log
 
-def test_refusal_sets_refused_flag():
-    assert parse_stream(_lines(REFUSAL_RUN)).refused is True
+    first, second, log = asyncio.run(scenario())
+    assert first.error and ("timed out" in first.error or "did not answer" in first.error)
+    assert second.error is None
+    assert _starts(log) == 2
 
 
-def test_other_failures_are_not_refusals():
-    assert parse_stream(_lines({"type": "runError", "data": {"message": "boom"}})).refused is False
-    assert parse_stream(_lines(RUN_FINISHED)).refused is False
+def test_crashed_process_is_an_error_and_is_restarted(tmp_path):
+    async def scenario():
+        runner, log = _runner(tmp_path, mode="crash_on_prompt")
+        workdir = runner.workdir_for(10)
+        try:
+            first = await runner.run_prompt(workdir, None, "упаду")
+            runner._env["FAKE_MODE"] = "normal"
+            second = await runner.run_prompt(workdir, None, "ещё раз")
+        finally:
+            await runner.close()
+        return first, second, log
+
+    first, second, log = asyncio.run(scenario())
+    assert first.error
+    assert second.final_text == "Ответ: ещё раз"
+    assert _starts(log) == 2
+
+
+def test_permission_requests_are_refused(tmp_path):
+    async def scenario():
+        runner, log = _runner(tmp_path, mode="permission")
+        try:
+            return await runner.run_prompt(runner.workdir_for(11), None, "нужен инструмент"), log
+        finally:
+            await runner.close()
+
+    result, log = asyncio.run(scenario())
+    assert result.final_text == "Ответ: нужен инструмент"
+    (reply,) = [e["reply"] for e in _events(log) if e["event"] == "permission_reply"]
+    assert reply["result"] == {"outcome": {"outcome": "cancelled"}}
+
+
+def test_kiro_runs_under_the_acp_home(tmp_path):
+    home = tmp_path / "acp-home"
+
+    async def scenario():
+        runner, log = _runner(tmp_path, acp_home=home)
+        try:
+            await runner.run_prompt(runner.workdir_for(12), None, "hi")
+        finally:
+            await runner.close()
+        return log
+
+    log = asyncio.run(scenario())
+    (start,) = [e for e in _events(log) if e["event"] == "start"]
+    assert start["home"] == str(home)
+
+
+def test_least_recently_used_idle_process_is_closed(tmp_path):
+    async def scenario():
+        runner, log = _runner(tmp_path, max_connections=1)
+        try:
+            await runner.run_prompt(runner.workdir_for(13), None, "a")
+            await runner.run_prompt(runner.workdir_for(14), None, "b")
+            await runner.run_prompt(runner.workdir_for(13), None, "c")
+        finally:
+            await runner.close()
+        return log
+
+    log = asyncio.run(scenario())
+    assert _starts(log) == 3
+
+
+# ---- deletion -------------------------------------------------------------------------
+
+
+def test_delete_uses_session_delete(tmp_path):
+    async def scenario():
+        runner, log = _runner(tmp_path)
+        try:
+            error = await runner.delete_session(runner.workdir_for(15), "sess_0000beef")
+        finally:
+            await runner.close()
+        return error, log
+
+    error, log = asyncio.run(scenario())
+    assert error is None
+    (delete,) = _requests(log, "session/delete")
+    assert delete["sessionId"] == "sess_0000beef"
+
+
+def test_delete_rejects_bad_session_id(tmp_path):
+    async def scenario():
+        runner, _ = _runner(tmp_path)
+        return await runner.delete_session(runner.workdir_for(16), "bad id")
+
+    assert asyncio.run(scenario()) == "invalid session id"
