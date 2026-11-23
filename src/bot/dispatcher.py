@@ -22,6 +22,7 @@ class TextJob:
     text: str
     pending_name: str | None = None  # set when the Session is new and not yet stored
     summary_of: str | None = None  # old Session sid when this new Session comes from a summary
+    persona_key: str | None = None  # character of a new Session; None means the default
     chat_id: int | None = None  # group to answer in; None means the private chat with user_id
     reply_to: int | None = None  # group message to reply to
 

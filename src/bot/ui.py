@@ -15,6 +15,7 @@ from aiogram.types import (
 )
 
 from bot.pagination import Page
+from bot.persona import PERSONAS
 
 
 class SessionCb(CallbackData, prefix="s"):
@@ -35,36 +36,17 @@ class ChoiceCb(CallbackData, prefix="c"):
     sid: str
 
 
-ASK_NAME = "Как назовём эту беседу? Напиши имя."
-NAME_INVALID = "Имя пустое, длиннее 40 символов или уже занято. Введите другое имя."
-NO_ACTIVE = "Беседа не открыта. Откройте беседу из списка или создайте новую."
-PENDING_NOT_CREATED = "Беседа ещё не создана. Отправьте первое сообщение в новой беседе."
-FULL_TEXT = (
-    "Беседа заполнена, новые сообщения сейчас не принимаю. "
-    "Начни новую или удали старую."
-)
-NON_TEXT = "Поддерживаются только текстовые сообщения."
-EMPTY_LIST = "Бесед пока нет. Начни новую, когда будешь готов."
-LIST_TITLE = "Ваши беседы (новые сверху):"
-OPEN_TEXT = "Беседа «{name}» открыта. Говори, что нужно."
-DELETE_CONFIRM = "Удалить беседу «{name}»? Это нельзя отменить."
-CANCELLED = "Удаление отменено."
-NEW_READY = "Беседа «{name}» откроется, как только получу первое сообщение."
-SUMMARY_STARTED = "Подвожу итог. Скоро будет готов."
-SUMMARY_NAME_PROMPT = "Введите имя новой беседы для выжимки."
-CHOICE_TEXT = "Какую беседу сделать текущей?"
-CONTEXT_VALUE = "Беседа «{name}»: заполненность {value}."
-CONTEXT_UNKNOWN = "Беседа «{name}»: данных о заполненности пока нет."
-CONTEXT_PENDING = "Беседа «{name}» ещё не создана. Заполненность появится после первого ответа."
-CONTEXT_FULL_NOTE = "Беседа заполнена, новые сообщения не принимаю. Очисти её или начни новую."
+class PersonaCb(CallbackData, prefix="pc"):
+    key: str  # a key of bot.persona.PERSONAS
 
 
-GROUP_NEW_TEXT = "Новый разговор открыт. Говори, с чего начнём"
-GROUP_CLEARED_TEXT = "Контекст беседы очищен. Следующее сообщение начнёт новый разговор."
-GROUP_FULL_TEXT = (
-    "Беседа заполнена, сообщения сейчас не принимаю. "
-    "Нажмите «Очистить контекст» или начните новую беседу."
-)
+class GroupPersonaCb(CallbackData, prefix="gp"):
+    key: str  # a key of bot.persona.PERSONAS
+    user_id: int  # only this member can pick; the pick starts their Session in the group
+
+
+
+
 
 def button(text: str, data: CallbackData) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data.pack())
@@ -136,14 +118,34 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="summary", description="Выжимка в новую беседу"),
     BotCommand(command="context", description="Заполненность контекста"),
 ]
-START_TEXT = (
-    "Тьма учила меня говорить громко, но в личных разговорах хватает и тихих слов. "
-    "Ты написал напрямую, значит, дело у тебя не для всех. "
-    "Говори, что нужно, без предисловий. Я выслушаю и отвечу честно."
-)
 
 
 def commands_keyboard() -> ReplyKeyboardMarkup:
     rows = [[KeyboardButton(text=f"/{c.command}") for c in BOT_COMMANDS[:2]],
             [KeyboardButton(text=f"/{c.command}") for c in BOT_COMMANDS[2:]]]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
+
+
+PERSONA_CHOICE_TEXT = "С кем начнём новую беседу? Выбери персонажа."
+
+
+def group_persona_choice_markup(user_id: int) -> InlineKeyboardMarkup:
+    """Character buttons for a group. Only user_id can press them."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [button(persona.display_name, GroupPersonaCb(key=key, user_id=user_id))]
+            for key, persona in PERSONAS.items()
+        ]
+    )
+
+
+def persona_choice_markup() -> InlineKeyboardMarkup:
+    """One button per registered character. Its name becomes the postfix of the Session name."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [button(persona.display_name, PersonaCb(key=key))]
+            for key, persona in PERSONAS.items()
+        ]
+    )
+
+COMMANDS_HINT = "Команды доступны на клавиатуре под полем ввода."

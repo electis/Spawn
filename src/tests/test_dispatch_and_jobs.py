@@ -11,12 +11,12 @@ from bot.context_display import is_full
 from bot.dispatcher import DeleteJob, TextJob, UserDispatcher
 from bot.gate import ContextGate
 from bot.dispatcher import SummaryJob
-from bot.jobs import DELETE_FAILED_TEXT, SUMMARY_FAILED_TEXT, JobProcessor
+from bot.jobs import JobProcessor
 from bot.kiro_parser import RunResult
 from bot.models import SessionRecord
 from bot.session_store import SessionStore
 from bot.summary import SUMMARY_PROMPT
-from bot.persona import first_message
+from bot.persona import DEFAULT_PERSONA, first_message
 
 OK_RESULT = RunResult("sess_11111111", "reply", None, None)
 
@@ -51,7 +51,9 @@ class FakeNotifier:
     async def send_text(self, user_id, text, reply_to=None):
         self.texts.append((user_id, text))
 
-    async def send_reply(self, user_id, chunks, display, choice=None, reply_to=None, group=False):
+    async def send_reply(
+        self, user_id, chunks, display, choice=None, reply_to=None, group=False, choice_text=""
+    ):
         self.replies.append((user_id, chunks, display))
         self.choices.append(choice)
 
@@ -94,12 +96,18 @@ def test_summary_failure_changes_nothing(tmp_path):
     assert store.find_session(1, "aaaaaaaa").context_usage == 2.0
     assert store.get_user(1).active_sid == "aaaaaaaa"
     assert notifier.summaries == []
-    assert notifier.texts == [(1, SUMMARY_FAILED_TEXT)]
+    assert notifier.texts == [(1, DEFAULT_PERSONA.summary_failed_text)]
 
 
 def test_first_reply_of_summary_session_offers_choice(tmp_path):
     store = _store(tmp_path)
-    runner = FakeRunner(tmp_path, results=[RunResult("sess_99999999", "hi", 1.0, None)])
+    runner = FakeRunner(
+        tmp_path,
+        results=[
+            RunResult("sess_99999999", "Тема", 1.0, None),  # name of the new Session
+            RunResult("sess_99999999", "hi", 1.0, None),  # reply to the summary text
+        ],
+    )
     notifier = FakeNotifier()
     processor = JobProcessor(store, runner, notifier, now=lambda: "t1")
     job = TextJob(1, "cccccccc", "summary text", pending_name="Новая", summary_of="aaaaaaaa")
@@ -267,20 +275,29 @@ def test_failed_first_request_leaves_store_unchanged(tmp_path):
 
 def test_first_reply_stores_pending_session_and_activates_it(tmp_path):
     store = _store(tmp_path)
-    runner = FakeRunner(tmp_path, results=[RunResult("sess_99999999", "hello", 2.0, None)])
+    runner = FakeRunner(
+        tmp_path,
+        results=[
+            RunResult("sess_99999999", "Тема", 1.0, None),  # name of the new Session
+            RunResult("sess_99999999", "hello", 2.0, None),  # reply to the first message
+        ],
+    )
     notifier = FakeNotifier()
     processor = JobProcessor(store, runner, notifier, now=lambda: "t1")
 
     asyncio.run(processor.text(TextJob(1, "cccccccc", "hi", pending_name="New one")))
 
     user = store.get_user(1)
-    assert [s.name for s in user.sessions] == ["New one"]
+    assert [s.name for s in user.sessions] == ["Тема (Спаун)"]  # named from the first message
     assert user.sessions[0].session_id == "sess_99999999"
     assert user.active_sid == "cccccccc"
-    assert runner.prompts == [(None, first_message("hi"))]  # a new Session has no --resume-id
+    # the naming request opens the Kiro Session; the reply resumes it with the character instructions
+    assert runner.prompts == [
+        (None, f"{DEFAULT_PERSONA.title_prompt}\n\nhi"),
+        ("sess_99999999", first_message("hi")),
+    ]
 
 
-# Feature: telegram-kiro-bot, Property 17: Delete changes the store only on confirmed success
 def test_delete_success_removes_record_and_clears_active(tmp_path):
     store = _store(tmp_path)
     runner = FakeRunner(tmp_path)
@@ -311,7 +328,7 @@ def test_delete_failure_keeps_record(tmp_path):
     asyncio.run(run())
     assert [s.sid for s in store.get_user(1).sessions] == ["aaaaaaaa"]
     assert store.get_user(1).active_sid == "aaaaaaaa"
-    assert notifier.texts == [(1, DELETE_FAILED_TEXT)]
+    assert notifier.texts == [(1, DEFAULT_PERSONA.delete_failed_text)]
 
 
 def test_pending_session_without_session_id_is_dropped_without_kiro(tmp_path):

@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from bot.persona import DEFAULT_PERSONA_KEY
+
 _STR_FIELDS = ("sid", "name", "session_id", "created_at", "updated_at")
 
 
@@ -17,6 +19,7 @@ class SessionRecord:
     context_usage: float | None
     created_at: str
     updated_at: str
+    persona: str = DEFAULT_PERSONA_KEY  # key of the character chosen when the Session was created
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -26,6 +29,7 @@ class SessionRecord:
             "context_usage": self.context_usage,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "persona": self.persona,
         }
 
     @classmethod
@@ -38,6 +42,10 @@ class SessionRecord:
             isinstance(usage, bool) or not isinstance(usage, (int, float))
         ):
             raise ValueError("context_usage must be a number or null")
+        # Sessions stored before characters existed have no persona key: they use the default.
+        persona = data.get("persona", DEFAULT_PERSONA_KEY)
+        if not isinstance(persona, str):
+            raise ValueError("persona must be a string")
         return cls(
             sid=data["sid"],
             name=data["name"],
@@ -45,6 +53,7 @@ class SessionRecord:
             context_usage=None if usage is None else float(usage),
             created_at=data["created_at"],
             updated_at=data["updated_at"],
+            persona=persona,
         )
 
 
