@@ -3,3 +3,5 @@
 /.kiro/
 /docs/
 /.local/
+.venv/
+__pycache__/
