@@ -19,6 +19,7 @@ from aiogram.types import (
 )
 
 from bot.groups import PRESENT_STATUSES, GroupRecord
+from bot.persona import DEFAULT_PERSONA
 from bot.roles import is_admin_username
 from bot.state import Services
 
@@ -30,11 +31,7 @@ ALLOWED_TEXT = "Группа разрешена."
 DENIED_TEXT = "Группа запрещена."
 NOT_IN_GROUP = "Бот не состоит в этой группе, разрешить её нельзя."
 UNKNOWN_GROUP = "Группа не найдена."
-GREETING_TEXT = (
-    "Тьма дала мне имя, громкое и тяжёлое, как цепи. Свет не стал спорить с ним. "
-    "Он пришёл тихо и занял место в сердце. Победа ждала меня, а мне оставалось только принять её.\n\n"
-    "Зови меня Спаун."
-)
+GREETING_TEXT = DEFAULT_PERSONA.greeting_text
 
 
 class GroupCb(CallbackData, prefix="g"):

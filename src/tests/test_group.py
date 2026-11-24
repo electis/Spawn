@@ -10,7 +10,7 @@ from aiogram.types import Chat, Message, User
 from bot.context_display import GROUP_SHOW_THRESHOLD, SHOW_THRESHOLD, display_for
 from bot.dispatcher import TextJob
 from bot.gate import ContextGate
-from bot.group_handlers import on_group_clear, on_group_new, on_group_text
+from bot.group_handlers import on_group_clear, on_group_new, on_group_persona, on_group_text
 from bot.group_trigger import mentions_bot, parse_trigger
 from bot.jobs import JobProcessor
 from bot.kiro_parser import RunResult
@@ -18,7 +18,8 @@ from bot.notifier import AiogramNotifier
 from bot.scope import store_key
 from bot.session_store import SessionStore
 from bot.state import Services
-from bot.ui import GROUP_FULL_TEXT, GROUP_NEW_TEXT
+from bot.persona import PERSONAS, DEFAULT_PERSONA
+from bot.ui import PERSONA_CHOICE_TEXT, GroupPersonaCb
 from tests.test_dispatch_and_jobs import FakeRunner
 
 GROUP = -1001234567890
@@ -179,41 +180,71 @@ def test_mention_triggers_with_text_kept(tmp_path):
     assert [job.text for job in dispatcher.jobs] == ["@RUSpawnAI привет"]
 
 
-def test_group_new_creates_pending_session_for_that_group_user_only(tmp_path):
-    class Reply:
-        def __init__(self):
-            self.chat = Chat(id=GROUP, type="supergroup", title="team")
-            self.from_user = User(id=USER, is_bot=False, first_name="A")
-            self.sent = []
+class _Chat:
+    def __init__(self, chat_id):
+        self.id = chat_id
 
-        async def reply(self, text, **_):
-            self.sent.append(text)
 
+class _GroupMessage:
+    """Records replies and answers sent in the group, in place of a Telegram message."""
+
+    def __init__(self):
+        self.chat = _Chat(GROUP)
+        self.from_user = User(id=USER, is_bot=False, first_name="A")
+        self.sent = []  # (text, reply_markup)
+
+    async def reply(self, text, reply_markup=None, **_):
+        self.sent.append((text, reply_markup))
+
+    async def answer(self, text, reply_markup=None, **_):
+        self.sent.append((text, reply_markup))
+
+
+class _GroupQuery:
+    def __init__(self, from_id=USER):
+        self.message = _GroupMessage()
+        self.from_user = User(id=from_id, is_bot=False, first_name="A")
+        self.answers = []
+
+    async def answer(self, text=None, **_):
+        self.answers.append(text)
+
+
+def test_group_new_offers_persona_choice_to_that_user_only(tmp_path):
     services, _ = _services(tmp_path)
-    message = Reply()
-    asyncio.run(on_group_new(message, services))
-    assert message.sent == [GROUP_NEW_TEXT]
-    key = store_key(GROUP, USER)
-    assert key in services.pending
-    assert store_key(GROUP, USER + 1) not in services.pending
-    assert USER not in services.pending
+    message = _GroupMessage()
+    asyncio.run(on_group_new(message))
+    ((text, markup),) = message.sent
+    assert text == PERSONA_CHOICE_TEXT
+    buttons = [row[0].callback_data for row in markup.inline_keyboard]
+    assert buttons == [GroupPersonaCb(key=key, user_id=USER).pack() for key in PERSONAS]
+    assert services.pending == {}  # no Session until a character is picked
 
 
-def test_clear_callback_starts_a_new_pending_session(tmp_path):
-    class Query:
-        def __init__(self):
-            self.message = _group_message("x")
-            self.from_user = User(id=USER, is_bot=False, first_name="A")
-            self.answers = []
-
-        async def answer(self, text=None, **_):
-            self.answers.append(text)
-
+def test_group_persona_pick_starts_session_with_that_character(tmp_path):
     services, _ = _services(tmp_path)
-    query = Query()
-    asyncio.run(on_group_clear(query, services))
-    assert store_key(GROUP, USER) in services.pending
-    assert query.answers and query.answers[0]
+    query = _GroupQuery()
+    asyncio.run(on_group_persona(query, GroupPersonaCb(key="writer", user_id=USER), services))
+    pending = services.pending[store_key(GROUP, USER)]
+    assert pending.persona == "writer"
+    assert pending.name.startswith("Беседа ") and pending.name.endswith("(Писатель)")
+    assert query.message.sent == [(DEFAULT_PERSONA.group_new_text, None)]  # the writer has no greeting yet
+
+
+def test_group_persona_pick_by_another_member_is_ignored(tmp_path):
+    services, _ = _services(tmp_path)
+    query = _GroupQuery(from_id=USER + 1)
+    asyncio.run(on_group_persona(query, GroupPersonaCb(key="writer", user_id=USER), services))
+    assert services.pending == {}
+    assert query.message.sent == []
+
+
+def test_group_clear_offers_persona_choice_without_starting_a_session(tmp_path):
+    services, _ = _services(tmp_path)
+    query = _GroupQuery()
+    asyncio.run(on_group_clear(query))
+    assert [text for text, _ in query.message.sent] == [PERSONA_CHOICE_TEXT]
+    assert services.pending == {}
 
 
 # ---- processing and output -------------------------------------------------------------
@@ -231,7 +262,7 @@ class GroupNotifier:
         self.texts.append((chat_id, text, reply_to))
 
     async def send_reply(
-        self, chat_id, chunks, display, choice=None, reply_to=None, group=False
+        self, chat_id, chunks, display, choice=None, reply_to=None, group=False, choice_text=""
     ):
         self.replies.append(
             {"chat": chat_id, "display": display, "reply_to": reply_to, "group": group}
@@ -246,7 +277,13 @@ class GroupNotifier:
 
 def test_group_reply_goes_to_group_as_reply_with_group_threshold(tmp_path):
     store = SessionStore(tmp_path / "sessions.json")
-    runner = FakeRunner(tmp_path, results=[RunResult("sess_00000001", "ответ", 6.5, None)])
+    runner = FakeRunner(
+        tmp_path,
+        results=[
+            RunResult("sess_00000001", "ответ", 6.5, None),
+            RunResult("sess_00000001", "Тема", 1.0, None),  # name of the new Session
+        ],
+    )
     notifier = GroupNotifier()
     processor = JobProcessor(store, runner, notifier)
     key = store_key(GROUP, USER)
@@ -277,12 +314,11 @@ def test_group_blocked_message_gets_group_text_and_clear_button(tmp_path):
     asyncio.run(notifier.send_blocked(job))
     chat_id, text, kwargs = bot.sent[0]
     assert chat_id == GROUP
-    assert text == GROUP_FULL_TEXT
+    assert text == DEFAULT_PERSONA.group_full_text
     assert kwargs["reply_parameters"].message_id == 77
     button = kwargs["reply_markup"].inline_keyboard[0][0]
     assert button.text == "Очистить контекст"
-    assert "Сделать выжимку" not in GROUP_FULL_TEXT
-
+    assert "Сделать выжимку" not in DEFAULT_PERSONA.group_full_text
 
 
 # ---- greeting on join ------------------------------------------------------------------
@@ -377,7 +413,7 @@ def test_new_session_first_message_carries_persona_and_user_text(tmp_path):
     processor = JobProcessor(store, runner, GroupNotifier())
     job = TextJob(USER, "aaaaaaaa", "Что такое благодать?", pending_name="Новая")
     asyncio.run(processor.text(job))
-    (prompt,) = runner.prompts
+    prompt = runner.prompts[1]  # the reply to the first message; the naming request came first
     assert PERSONA_PROMPT in prompt
     assert prompt.endswith("Что такое благодать?")
 

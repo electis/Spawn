@@ -130,6 +130,18 @@ class SessionStore:
 
         await self._mutate(change)
 
+    async def rename_session(self, user_id: int, sid: str, name: str) -> None:
+        def change(users: dict[int, UserRecord]) -> None:
+            user = users.get(user_id)
+            session = None
+            if user is not None:
+                session = next((s for s in user.sessions if s.sid == sid), None)
+            if session is None:
+                raise StoreError(f"unknown session {sid}")
+            session.name = name
+
+        await self._mutate(change)
+
     async def set_context_usage(self, user_id: int, sid: str, usage: float) -> None:
         """Replace one Session's raw usage. None is refused so a value is never reset (4.5)."""
         if usage is None or isinstance(usage, bool) or not isinstance(usage, (int, float)):

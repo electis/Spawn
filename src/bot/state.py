@@ -10,11 +10,12 @@ from bot.dispatcher import UserDispatcher
 from bot.gate import ContextGate
 from bot.groups import GroupRegistry
 from bot.membership import MembershipChecker
+from bot.persona import DEFAULT_PERSONA, DEFAULT_PERSONA_KEY, Persona, resolve_persona
 from bot.session_store import SessionStore
 
 
 class SessionNameStates(StatesGroup):
-    awaiting_name: State = State()
+    awaiting_persona: State = State()  # the user picks the character of the new Session
 
 
 @dataclass
@@ -24,6 +25,7 @@ class PendingSession:
     sid: str
     name: str
     summary_of: str | None = None
+    persona: str = DEFAULT_PERSONA_KEY
 
 
 @dataclass
@@ -60,3 +62,15 @@ def active_sid(services: Services, key: int) -> str | None:
     if pending is not None:
         return pending.sid
     return services.store.get_user(key).active_sid
+
+
+def persona_for(services: Services, key: int) -> Persona:
+    """The character of the conversation a User is in: pending, then active, else the default."""
+    sid = active_sid(services, key)
+    if sid is None:
+        return DEFAULT_PERSONA
+    pending = services.pending.get(key)
+    if pending is not None and pending.sid == sid:
+        return resolve_persona(pending.persona)
+    session = services.store.find_session(key, sid)
+    return resolve_persona(session.persona if session is not None else None)

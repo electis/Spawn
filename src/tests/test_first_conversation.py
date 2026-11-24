@@ -8,7 +8,11 @@ from bot.gate import ContextGate
 from bot.handlers import _ensure_first_session, on_command_start
 from bot.models import SessionRecord
 from bot.session_store import SessionStore
-from bot.state import Services
+from bot import ui
+from bot.state import Services, SessionNameStates
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
 
 USER = 77
 
@@ -30,14 +34,16 @@ def _services(tmp_path):
     return Services(store=store, gate=ContextGate(store), dispatcher=UserDispatcher(handle))
 
 
-def test_start_opens_one_pending_conversation(tmp_path):
+def test_start_asks_for_a_character_and_opens_nothing_yet(tmp_path):
     services = _services(tmp_path)
-    asyncio.run(on_command_start(_Message(USER), services))
-    pending = services.pending[USER]
-    assert pending.name.startswith("Беседа ")
-    before = pending.sid
-    asyncio.run(on_command_start(_Message(USER), services))  # second /start keeps the same one
-    assert services.pending[USER].sid == before
+    state = FSMContext(
+        storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=USER, user_id=USER)
+    )
+    message = _Message(USER)
+    asyncio.run(on_command_start(message, state))
+    assert services.pending == {}  # the conversation opens after the character is picked
+    assert message.sent == [ui.PERSONA_CHOICE_TEXT, ui.COMMANDS_HINT]
+    assert asyncio.run(state.get_state()) == SessionNameStates.awaiting_persona.state
 
 
 def test_user_with_existing_conversations_gets_none_opened(tmp_path):

@@ -19,7 +19,7 @@ from aiogram.types import ChatMemberLeft, ChatMemberMember, ChatMemberUpdated, M
 
 from bot import ui
 from bot.admin import GROUPS_TITLE
-from bot.persona import first_message
+from bot.persona import DEFAULT_PERSONA, PERSONAS, first_message
 from bot.admin import GroupCb, admin_router
 from bot.groups import GroupRegistry
 from bot.middleware import REFUSAL_TEXT
@@ -185,8 +185,12 @@ def test_first_text_opens_a_conversation_automatically(tmp_path):
     services, runner = _services(tmp_path)
     SESSION.member_status = "member"
     asyncio.run(_feed(_text_update(next(_ids), "hi"), services))
-    assert ui.NO_ACTIVE not in _sent()
-    assert [text for _, text in runner.prompts] == [first_message("hi")]  # first message of a new Session
+    assert DEFAULT_PERSONA.no_active not in _sent()
+    # first message of a new Session, then the request that names it
+    assert [text for _, text in runner.prompts] == [
+        f"{DEFAULT_PERSONA.title_prompt}\n\nhi",  # names the Session
+        first_message("hi"),  # the reply
+    ]
 
 
 def test_new_conversation_round_trip(tmp_path):
@@ -195,28 +199,18 @@ def test_new_conversation_round_trip(tmp_path):
     uid = next(_ids)
 
     asyncio.run(_feed(_callback_update(uid, ui.MenuCb(action="new").pack()), services))
-    assert ui.ASK_NAME in _sent()
-
-    asyncio.run(_feed(_text_update(uid, "Проект"), services))
-    assert ui.NEW_READY.format(name="Проект") in _sent()
-    assert runner.prompts == []  # the name alone sends no request
+    assert ui.PERSONA_CHOICE_TEXT in _sent()
+    asyncio.run(_feed(_callback_update(uid, ui.PersonaCb(key="spawn").pack()), services))
+    assert PERSONAS["spawn"].start_text in _sent()  # the character greets the user
+    assert runner.prompts == []  # choosing a character sends no request
 
     asyncio.run(_feed(_text_update(uid, "Привет"), services))
-    assert runner.prompts == [(None, first_message("Привет"))]
+    assert runner.prompts[0] == (None, f"{DEFAULT_PERSONA.title_prompt}\n\nПривет")
+    assert runner.prompts[1] == ("sess_0000aaaa", first_message("Привет"))
     assert "ответ" in _sent()
     user = services.store.get_user(uid)
-    assert [s.name for s in user.sessions] == ["Проект"]
+    assert [s.name for s in user.sessions] == ["ответ (Спаун)"]  # named by the naming request
     assert user.active_sid is not None
-
-
-def test_invalid_name_keeps_state_and_sends_no_request(tmp_path):
-    services, runner = _services(tmp_path)
-    SESSION.member_status = "member"
-    uid = next(_ids)
-    asyncio.run(_feed(_callback_update(uid, ui.MenuCb(action="new").pack()), services))
-    asyncio.run(_feed(_text_update(uid, "   "), services))
-    assert ui.NAME_INVALID in _sent()
-    assert runner.prompts == []
 
 
 def test_open_session_sets_active_locally(tmp_path):
@@ -227,7 +221,7 @@ def test_open_session_sets_active_locally(tmp_path):
     asyncio.run(
         _feed(_callback_update(uid, ui.SessionCb(action="o", sid="aaaaaaaa").pack()), services)
     )
-    assert ui.OPEN_TEXT.format(name="Notes") in _sent()
+    assert DEFAULT_PERSONA.open_text.format(name="Notes") in _sent()
     assert services.store.get_user(uid).active_sid == "aaaaaaaa"
     assert runner.prompts == []
 
@@ -239,7 +233,7 @@ def test_full_session_blocks_text_and_offers_options(tmp_path):
     asyncio.run(services.store.add_session(uid, _session("aaaaaaaa", "Full", usage=12.0)))
     asyncio.run(services.store.set_active(uid, "aaaaaaaa"))
     asyncio.run(_feed(_text_update(uid, "ещё"), services))
-    assert ui.FULL_TEXT in _sent()
+    assert DEFAULT_PERSONA.full_text in _sent()
     assert runner.prompts == []
 
 
@@ -248,7 +242,7 @@ def test_empty_list_message(tmp_path):
     SESSION.member_status = "member"
     uid = next(_ids)
     asyncio.run(_feed(_callback_update(uid, ui.MenuCb(action="list").pack()), services))
-    assert ui.EMPTY_LIST in _sent()
+    assert DEFAULT_PERSONA.empty_list in _sent()
 
 
 def test_summary_flow_end_to_end(tmp_path):
@@ -256,7 +250,8 @@ def test_summary_flow_end_to_end(tmp_path):
         tmp_path,
         results=[
             RunResult("sess_0000aaaa", "Выжимка: факты", 3.0, None),  # summary of old session
-            RunResult("sess_0000bbbb", "Ответ в новой сессии", 1.0, None),  # first reply of new
+            RunResult("sess_0000bbbb", "Тема", 1.0, None),  # name of the new Session
+            RunResult("sess_0000bbbb", "Ответ в новой сессии", 1.0, None),  # reply to the summary
         ],
     )
     SESSION.member_status = "member"
@@ -267,12 +262,14 @@ def test_summary_flow_end_to_end(tmp_path):
     asyncio.run(_feed(_callback_update(uid, ui.MenuCb(action="sum").pack()), services))
     assert "Выжимка: факты" in _sent()
     assert runner.prompts[0][0] == "sess_0000aaaa"  # summary goes to the old Session
+    asyncio.run(_feed(_callback_update(uid, ui.PersonaCb(key="spawn").pack()), services))
 
-    asyncio.run(_feed(_text_update(uid, "Новая"), services))
-    assert runner.prompts[1] == (None, first_message("Выжимка: факты"))  # new Session, no --resume-id
-    assert [s.name for s in services.store.get_user(uid).sessions] == ["Old", "Новая"]
-    assert ui.CHOICE_TEXT in _sent()
+    assert runner.prompts[1] == (None, f"{DEFAULT_PERSONA.title_prompt}\n\nВыжимка: факты")
+    assert runner.prompts[2] == ("sess_0000bbbb", first_message("Выжимка: факты"))  # no --resume-id at first
+    assert [s.name for s in services.store.get_user(uid).sessions] == ["Old", "Тема (Спаун)"]
+    assert DEFAULT_PERSONA.choice_text in _sent()
     assert "Ответ в новой сессии" in _sent()
+
 
 # ---- Admin (ADMIN_USERNAME) -------------------------------------------------------------
 
@@ -323,7 +320,7 @@ def test_admin_lists_groups_with_toggle_state(tmp_path):
     services.groups.set_allowed(-1002, True)
     asyncio.run(_feed(_admin_message("/admin"), services))
 
-    assert ui.NO_ACTIVE not in _sent()
+    assert DEFAULT_PERSONA.no_active not in _sent()
     texts = _button_texts(_sent_markups()[-1])
     assert "⬜ Dev chat" in texts
     assert "✅ Old chat (бота нет)" in texts
@@ -351,7 +348,7 @@ def test_non_admin_admin_command_is_ordinary_text(tmp_path):
     SESSION.member_status = "member"
     asyncio.run(_feed(_admin_message("/admin", username="someone"), services))
     assert GROUPS_TITLE not in _sent()  # no admin list is shown
-    assert [text for _, text in runner.prompts] == [first_message("/admin")]  # ordinary text
+    assert [text for _, text in runner.prompts][1] == first_message("/admin")  # ordinary text
 
 
 def test_non_admin_cannot_toggle_group(tmp_path):
@@ -415,7 +412,7 @@ def test_context_shows_value_below_show_threshold(tmp_path):
     asyncio.run(services.store.add_session(uid, _session("aaaaaaaa", "Quiet", usage=0.2)))
     asyncio.run(services.store.set_active(uid, "aaaaaaaa"))
     asyncio.run(_feed(_command_update(uid, "/context"), services))
-    assert ui.CONTEXT_VALUE.format(name="Quiet", value="2.0%") in _sent()
+    assert DEFAULT_PERSONA.context_value.format(name="Quiet", value="2.0%") in _sent()
     assert runner.prompts == []
 
 
@@ -427,7 +424,7 @@ def test_context_in_full_state_shows_value_and_note(tmp_path):
     asyncio.run(services.store.set_active(uid, "aaaaaaaa"))
     asyncio.run(_feed(_command_update(uid, "/context"), services))
     sent = _sent()
-    expected = ui.CONTEXT_VALUE.format(name="Big", value="120.0%") + "\n" + ui.CONTEXT_FULL_NOTE
+    expected = DEFAULT_PERSONA.context_value.format(name="Big", value="120.0%") + "\n" + DEFAULT_PERSONA.context_full_note
     assert sent == [expected]
     assert runner.prompts == []
 
@@ -439,14 +436,14 @@ def test_context_without_value_says_unknown(tmp_path):
     asyncio.run(services.store.add_session(uid, _session("aaaaaaaa", "New", usage=None)))
     asyncio.run(services.store.set_active(uid, "aaaaaaaa"))
     asyncio.run(_feed(_command_update(uid, "/context"), services))
-    assert ui.CONTEXT_UNKNOWN.format(name="New") in _sent()
+    assert DEFAULT_PERSONA.context_unknown.format(name="New") in _sent()
 
 
 def test_context_without_active_session(tmp_path):
     services, _ = _services(tmp_path)
     SESSION.member_status = "member"
     asyncio.run(_feed(_command_update(next(_ids), "/context"), services))
-    assert _sent() == [ui.NO_ACTIVE]
+    assert _sent() == [DEFAULT_PERSONA.no_active]
 
 
 def test_context_command_is_not_taken_as_session_name(tmp_path):
@@ -455,7 +452,7 @@ def test_context_command_is_not_taken_as_session_name(tmp_path):
     uid = next(_ids)
     asyncio.run(_feed(_callback_update(uid, ui.MenuCb(action="new").pack()), services))
     asyncio.run(_feed(_command_update(uid, "/context"), services))
-    assert ui.NO_ACTIVE in _sent()  # answered as a command, the name prompt is still active
+    assert DEFAULT_PERSONA.no_active in _sent()  # answered as a command, the name prompt is still active
     assert services.store.get_user(uid).sessions == []
 # ---- Command menu ------------------------------------------------------------------------
 
@@ -470,28 +467,30 @@ def test_command_menu_names_are_valid():
     assert all(re.fullmatch(r"[a-z0-9_]{1,32}", n) for n in names)
 
 
-def test_new_command_asks_for_name_and_takes_it(tmp_path):
+def test_new_command_asks_for_persona_then_opens_conversation(tmp_path):
     services, runner = _services(tmp_path)
     SESSION.member_status = "member"
     uid = next(_ids)
     asyncio.run(_feed(_command_update(uid, "/new"), services))
-    assert ui.ASK_NAME in _sent()
+    assert ui.PERSONA_CHOICE_TEXT in _sent()
+    asyncio.run(_feed(_callback_update(uid, ui.PersonaCb(key="spawn").pack()), services))
+    assert PERSONAS["spawn"].start_text in _sent()
     asyncio.run(_feed(_text_update(uid, "Команда"), services))
-    assert ui.NEW_READY.format(name="Команда") in _sent()
+    assert runner.prompts[-1] == ("sess_0000aaaa", first_message("Команда"))
 
 
 def test_sessions_command_shows_empty_message(tmp_path):
     services, _ = _services(tmp_path)
     SESSION.member_status = "member"
     asyncio.run(_feed(_command_update(next(_ids), "/sessions"), services))
-    assert ui.EMPTY_LIST in _sent()
+    assert DEFAULT_PERSONA.empty_list in _sent()
 
 
 def test_summary_command_without_active_session(tmp_path):
     services, runner = _services(tmp_path)
     SESSION.member_status = "member"
     asyncio.run(_feed(_command_update(next(_ids), "/summary"), services))
-    assert _sent() == [ui.NO_ACTIVE]
+    assert _sent() == [DEFAULT_PERSONA.no_active]
     assert runner.prompts == []
 def test_start_command_shows_text_and_command_keyboard(tmp_path):
     from aiogram.types import ReplyKeyboardMarkup
@@ -499,9 +498,24 @@ def test_start_command_shows_text_and_command_keyboard(tmp_path):
     services, runner = _services(tmp_path)
     SESSION.member_status = "member"
     asyncio.run(_feed(_command_update(next(_ids), "/start"), services))
-    assert ui.START_TEXT in _sent()
+    assert ui.PERSONA_CHOICE_TEXT in _sent()
+    assert ui.COMMANDS_HINT in _sent()
     markup = [m.reply_markup for m in SESSION.calls if isinstance(m, SendMessage)][-1]
     assert isinstance(markup, ReplyKeyboardMarkup)
     labels = [b.text for row in markup.keyboard for b in row]
     assert labels == ["/new", "/sessions", "/summary", "/context"]
     assert runner.prompts == []
+
+
+def test_writer_conversation_uses_its_prompt_and_postfix(tmp_path):
+    services, runner = _services(tmp_path)
+    SESSION.member_status = "member"
+    uid = next(_ids)
+    asyncio.run(_feed(_callback_update(uid, ui.MenuCb(action="new").pack()), services))
+    asyncio.run(_feed(_callback_update(uid, ui.PersonaCb(key="writer").pack()), services))
+    assert PERSONAS["writer"].greeting_text == ""  # no greeting, so nothing extra is sent
+    asyncio.run(_feed(_text_update(uid, "Привет"), services))
+    writer = PERSONAS["writer"]
+    assert runner.prompts[1] == ("sess_0000aaaa", writer.first_message("Привет"))
+    assert [s.name for s in services.store.get_user(uid).sessions] == ["ответ (Писатель)"]
+    assert services.store.get_user(uid).sessions[0].persona == "writer"
