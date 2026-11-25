@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from aiogram.types import Chat, Message, User
 
+from bot.db import Database
 from bot.context_display import GROUP_SHOW_THRESHOLD, SHOW_THRESHOLD, display_for
 from bot.dispatcher import TextJob
 from bot.gate import ContextGate
@@ -116,7 +117,7 @@ class RecordingDispatcher:
 
 
 def _services(tmp_path):
-    store = SessionStore(tmp_path / "sessions.json")
+    store = SessionStore(Database(tmp_path / "spawn.db"))
     dispatcher = RecordingDispatcher()
     services = Services(
         store=store,
@@ -276,7 +277,7 @@ class GroupNotifier:
 
 
 def test_group_reply_goes_to_group_as_reply_with_group_threshold(tmp_path):
-    store = SessionStore(tmp_path / "sessions.json")
+    store = SessionStore(Database(tmp_path / "spawn.db"))
     runner = FakeRunner(
         tmp_path,
         results=[
@@ -381,8 +382,7 @@ def test_greeting_only_when_bot_joins(tmp_path, old, new, greets):
     from bot.groups import GroupRegistry
 
     services, _ = _services(tmp_path)
-    services.groups = GroupRegistry(tmp_path / "groups.json")
-    services.groups.load()
+    services.groups = GroupRegistry(Database(tmp_path / "spawn.db"))
     bot = _SentBot()
     asyncio.run(on_my_chat_member(_membership_event(old, new), services, bot))
     if greets:
@@ -408,7 +408,7 @@ class _PromptRunner:
 def test_new_session_first_message_carries_persona_and_user_text(tmp_path):
     from bot.persona import PERSONA_PROMPT
 
-    store = SessionStore(tmp_path / "sessions.json")
+    store = SessionStore(Database(tmp_path / "spawn.db"))
     runner = _PromptRunner()
     processor = JobProcessor(store, runner, GroupNotifier())
     job = TextJob(USER, "aaaaaaaa", "Что такое благодать?", pending_name="Новая")
@@ -421,7 +421,7 @@ def test_new_session_first_message_carries_persona_and_user_text(tmp_path):
 def test_resumed_session_sends_only_the_user_text(tmp_path):
     from bot.models import SessionRecord
 
-    store = SessionStore(tmp_path / "sessions.json")
+    store = SessionStore(Database(tmp_path / "spawn.db"))
     asyncio.run(
         store.add_session(
             USER,

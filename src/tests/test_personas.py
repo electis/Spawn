@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from bot.db import Database
 from bot.gate import ContextGate
 from bot.group_trigger import parse_trigger
 from bot.models import SessionRecord
@@ -123,8 +124,7 @@ def test_session_record_rejects_a_non_string_persona():
 
 
 def test_rename_session_changes_only_the_name(tmp_path):
-    store = SessionStore(tmp_path / "store.json")
-    asyncio.run(store.load())
+    store = SessionStore(Database(tmp_path / "spawn.db"))
     asyncio.run(store.add_session(1, SessionRecord.from_dict(_record())))
     asyncio.run(store.rename_session(1, "aaaaaaaa", "Новое имя (Писатель)"))
     session = store.find_session(1, "aaaaaaaa")
@@ -133,8 +133,7 @@ def test_rename_session_changes_only_the_name(tmp_path):
 
 
 def test_rename_of_an_unknown_session_is_refused(tmp_path):
-    store = SessionStore(tmp_path / "store.json")
-    asyncio.run(store.load())
+    store = SessionStore(Database(tmp_path / "spawn.db"))
     with pytest.raises(StoreError):
         asyncio.run(store.rename_session(1, "missing0", "x"))
 
@@ -149,8 +148,7 @@ def test_a_character_overrides_a_phrase_and_the_base_keeps_its_default():
 
 
 def test_persona_for_returns_the_character_of_the_conversation(tmp_path):
-    store = SessionStore(tmp_path / "store.json")
-    asyncio.run(store.load())
+    store = SessionStore(Database(tmp_path / "spawn.db"))
     asyncio.run(store.add_session(1, SessionRecord.from_dict(_record(persona="writer"))))
     asyncio.run(store.set_active(1, "aaaaaaaa"))
     services = Services(store=store, gate=ContextGate(store), dispatcher=object())

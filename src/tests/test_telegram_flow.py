@@ -18,6 +18,7 @@ from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from aiogram.types import ChatMemberLeft, ChatMemberMember, ChatMemberUpdated, MessageEntity
 
 from bot import ui
+from bot.db import Database
 from bot.admin import GROUPS_TITLE
 from bot.persona import DEFAULT_PERSONA, PERSONAS, first_message
 from bot.admin import GroupCb, admin_router
@@ -25,6 +26,7 @@ from bot.groups import GroupRegistry
 from bot.middleware import REFUSAL_TEXT
 from bot.dispatcher import UserDispatcher
 from bot.gate import ContextGate
+from bot.group_handlers import GROUP_ANONYMOUS_BOT_ID, group_router
 from bot.handlers import router
 from bot.jobs import JobProcessor
 from bot.kiro_parser import RunResult
@@ -32,6 +34,7 @@ from bot.membership import MembershipChecker
 from bot.middleware import PrivateMembershipMiddleware
 from bot.models import SessionRecord
 from bot.notifier import AiogramNotifier
+from bot.scope import store_key
 from bot.session_store import SessionStore
 from bot.state import Services
 
@@ -85,16 +88,22 @@ SESSION = FakeSession()
 BOT = Bot(token="123456:TESTTOKEN", session=SESSION)
 STORAGE = MemoryStorage()
 CHECKER = MembershipChecker(BOT, [-1001], clock=lambda: 0.0, ttl=300)
+# The services of the test being fed, as the production gate reads them (bot/__main__.py).
+CURRENT: dict = {}
+def _group_open(chat_id: int) -> bool:
+    services = CURRENT.get("services")
+    return services is not None and services.group_is_open(chat_id)
+
 DP = Dispatcher(storage=STORAGE)
-DP.message.outer_middleware(PrivateMembershipMiddleware(CHECKER, admin_username="boss"))
-DP.callback_query.outer_middleware(PrivateMembershipMiddleware(CHECKER, admin_username="boss"))
+DP.message.outer_middleware(PrivateMembershipMiddleware(CHECKER, admin_username="boss", group_open=_group_open))
+DP.callback_query.outer_middleware(PrivateMembershipMiddleware(CHECKER, admin_username="boss", group_open=_group_open))
 DP.include_router(admin_router)
+DP.include_router(group_router)  # same order as production (bot/__main__.py)
 DP.include_router(router)
 
 
 def _services(tmp_path: Path, results=()) -> tuple[Services, FakeRunner]:
-    store = SessionStore(tmp_path / "store.json")
-    asyncio.run(store.load())
+    store = SessionStore(Database(tmp_path / "spawn.db"))
     runner = FakeRunner(tmp_path, results)
     notifier = AiogramNotifier(BOT, STORAGE)
     processor = JobProcessor(store, runner, notifier)
@@ -104,8 +113,7 @@ def _services(tmp_path: Path, results=()) -> tuple[Services, FakeRunner]:
         is_blocked=gate.blocks,
         on_blocked=notifier.send_blocked,
     )
-    groups = GroupRegistry(tmp_path / "groups.json")
-    groups.load()
+    groups = GroupRegistry(Database(tmp_path / "spawn.db"))
     services = Services(
         store=store,
         gate=gate,
@@ -150,8 +158,48 @@ def _callback_update(uid: int, data: str) -> Update:
     return Update(update_id=next(_ids), callback_query=query)
 
 
+GROUP_ID = -1001
+
+
+def _open_group(services: Services) -> None:
+    """Make GROUP_ID an allowed group the bot is in, as the admin would."""
+    services.groups.record_membership(GROUP_ID, "Team", present=True)
+    services.groups.set_allowed(GROUP_ID, True)
+
+
+def _group_text_update(uid: int, text: str, command: bool = False) -> Update:
+    entities = [MessageEntity(type="bot_command", offset=0, length=len(text))] if command else None
+    message = Message(
+        message_id=next(_ids),
+        date=0,
+        chat=Chat(id=GROUP_ID, type="supergroup", title="Team"),
+        from_user=_user(uid),
+        text=text,
+        entities=entities,
+    )
+    return Update(update_id=next(_ids), message=message)
+
+
+def _group_callback_update(uid: int, data: str) -> Update:
+    query = CallbackQuery(
+        id=str(next(_ids)),
+        from_user=_user(uid),
+        chat_instance="ci",
+        data=data,
+        message=Message(
+            message_id=next(_ids),
+            date=0,
+            chat=Chat(id=GROUP_ID, type="supergroup", title="Team"),
+            from_user=_user(uid),
+            text="Выбери персонажа",
+        ),
+    )
+    return Update(update_id=next(_ids), callback_query=query)
+
+
 async def _feed(update: Update, services: Services) -> None:
     SESSION.calls.clear()
+    CURRENT["services"] = services
     await DP.feed_update(BOT, update, services=services)
     await services.dispatcher.drain()
 
@@ -211,6 +259,64 @@ def test_new_conversation_round_trip(tmp_path):
     user = services.store.get_user(uid)
     assert [s.name for s in user.sessions] == ["ответ (Спаун)"]  # named by the naming request
     assert user.active_sid is not None
+
+
+def test_group_persona_pick_is_used_by_the_next_message(tmp_path):
+    services, runner = _services(tmp_path)
+    SESSION.member_status = "member"
+    _open_group(services)
+    uid = next(_ids)
+
+    asyncio.run(_feed(_group_text_update(uid, "/new", command=True), services))
+    assert ui.PERSONA_CHOICE_TEXT in _sent()
+
+    pick = ui.GroupPersonaCb(key="writer", user_id=uid).pack()
+    asyncio.run(_feed(_group_callback_update(uid, pick), services))
+    assert PERSONAS["writer"].greeting_text in _sent()  # the pick is handled, not ignored
+
+    asyncio.run(_feed(_group_text_update(uid, "spawn, привет"), services))
+    assert runner.prompts[0] == (None, f"{PERSONAS['writer'].title_prompt}\n\nпривет")
+    assert SESSION.calls  # the reply went out
+    assert services.store.get_user(_group_key(uid)).sessions[0].persona == "writer"
+
+
+def _anon_group_update(text: str, command: bool = False) -> Update:
+    """A message sent as the group: its author is GroupAnonymousBot, with sender_chat set."""
+    entities = [MessageEntity(type="bot_command", offset=0, length=len(text))] if command else None
+    message = Message(
+        message_id=next(_ids),
+        date=0,
+        chat=Chat(id=GROUP_ID, type="supergroup", title="Team"),
+        from_user=User(id=GROUP_ANONYMOUS_BOT_ID, is_bot=True, first_name="Group"),
+        sender_chat=Chat(id=GROUP_ID, type="supergroup", title="Team"),
+        text=text,
+        entities=entities,
+    )
+    return Update(update_id=next(_ids), message=message)
+
+
+def test_persona_pick_after_anonymous_new_applies_to_messages_sent_as_group(tmp_path):
+    services, runner = _services(tmp_path)
+    SESSION.member_status = "member"
+    _open_group(services)
+    admin = next(_ids)  # the real account that presses the buttons
+
+    asyncio.run(_feed(_anon_group_update("/new", command=True), services))
+    assert ui.PERSONA_CHOICE_TEXT in _sent()
+
+    pick = ui.GroupPersonaCb(key="writer", user_id=GROUP_ANONYMOUS_BOT_ID).pack()
+    asyncio.run(_feed(_group_callback_update(admin, pick), services))
+    assert PERSONAS["writer"].greeting_text in _sent()
+
+    asyncio.run(_feed(_anon_group_update("spawn, привет"), services))
+    assert runner.prompts[0] == (None, f"{PERSONAS['writer'].title_prompt}\n\nпривет")
+    owner = store_key(GROUP_ID, GROUP_ANONYMOUS_BOT_ID)
+    assert services.store.get_user(owner).sessions[0].persona == "writer"
+    assert "spawn, привет" in [m.text for m in services.group_log.messages(GROUP_ID)]
+
+
+def _group_key(uid: int) -> int:
+    return store_key(GROUP_ID, uid)
 
 
 def test_open_session_sets_active_locally(tmp_path):

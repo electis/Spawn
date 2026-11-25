@@ -1,116 +1,47 @@
-"""Group registry: seeding, persistence, membership updates, admin toggles, and corruption."""
+"""Group registry on the SQLite database: membership, the admin's allowed flag, persistence."""
 
-import json
-import os
-
-import pytest
-
-from bot.groups import GroupRegistry, GroupsError
-from bot.membership import MembershipChecker
-from bot.roles import is_admin_username
+from bot.db import Database
+from bot.groups import GroupRegistry
 
 
-def test_first_start_seeds_allowed_groups(tmp_path):
-    registry = GroupRegistry(tmp_path / "groups.json", seed_allowed=[-1, -2, -1])
-    registry.load()
-    assert registry.allowed_ids() == (-2, -1)
-    assert all(not g.present for g in registry.groups())
+def _registry(tmp_path):
+    return GroupRegistry(Database(tmp_path / "spawn.db"))
 
 
-def test_seed_is_ignored_when_file_exists(tmp_path):
-    path = tmp_path / "groups.json"
-    first = GroupRegistry(path, seed_allowed=[-1])
-    first.load()
-    second = GroupRegistry(path, seed_allowed=[-5])
-    second.load()
-    assert second.allowed_ids() == (-1,)
-
-
-def test_changes_survive_reload(tmp_path):
-    path = tmp_path / "groups.json"
-    registry = GroupRegistry(path)
-    registry.load()
-    registry.record_membership(-100, "Dev", True)
-    assert registry.set_allowed(-100, True)
-    reloaded = GroupRegistry(path)
-    reloaded.load()
-    record = reloaded.get(-100)
-    assert record.title == "Dev" and record.present and record.allowed
-
-
-def test_membership_update_keeps_allowed_flag(tmp_path):
-    registry = GroupRegistry(tmp_path / "groups.json")
-    registry.load()
-    registry.record_membership(-100, "Dev", True)
-    registry.set_allowed(-100, True)
-    registry.record_membership(-100, "", False)  # bot removed
+def test_new_group_starts_not_allowed_and_present_flag_follows_membership(tmp_path):
+    registry = _registry(tmp_path)
+    registry.record_membership(-100, "Team", present=True)
     record = registry.get(-100)
-    assert record.present is False and record.allowed is True
-    assert record.title == "Dev"
-
-
-def test_unknown_group_cannot_be_set(tmp_path):
-    registry = GroupRegistry(tmp_path / "groups.json")
-    registry.load()
-    assert registry.set_allowed(-999, True) is False
+    assert (record.title, record.present, record.allowed) == ("Team", True, False)
     assert registry.allowed_ids() == ()
 
-
-@pytest.mark.skipif(os.name != "posix", reason="mode check is POSIX only")
-def test_file_mode_is_0600(tmp_path):
-    registry = GroupRegistry(tmp_path / "groups.json")
-    registry.load()
-    registry.record_membership(-1, "x", True)
-    assert (tmp_path / "groups.json").stat().st_mode & 0o777 == 0o600
+    registry.record_membership(-100, "", present=False)
+    record = registry.get(-100)
+    assert record.present is False
+    assert record.title == "Team"  # an empty title from Telegram keeps the known one
 
 
-def test_corrupt_file_is_not_overwritten(tmp_path):
-    path = tmp_path / "groups.json"
-    path.write_text("{broken", encoding="utf-8")
-    with pytest.raises(GroupsError):
-        GroupRegistry(path).load()
-    assert path.read_text(encoding="utf-8") == "{broken"
+def test_admin_allowed_flag_survives_membership_changes(tmp_path):
+    registry = _registry(tmp_path)
+    registry.record_membership(-100, "Team", present=True)
+    assert registry.set_allowed(-100, True) is True
+    registry.record_membership(-100, "Team 2", present=False)
+    registry.record_membership(-100, "Team 2", present=True)
+    record = registry.get(-100)
+    assert record.allowed is True and record.title == "Team 2"
+    assert registry.allowed_ids() == (-100,)
 
 
-def test_unsupported_version_is_corrupt(tmp_path):
-    path = tmp_path / "groups.json"
-    path.write_text(json.dumps({"version": 9, "groups": []}), encoding="utf-8")
-    with pytest.raises(GroupsError):
-        GroupRegistry(path).load()
+def test_set_allowed_on_unknown_group_returns_false(tmp_path):
+    assert _registry(tmp_path).set_allowed(-7, True) is False
 
 
-def test_membership_checker_follows_callable_group_list():
-    class Bot:
-        def __init__(self):
-            self.asked = []
+def test_state_is_kept_after_reopen_and_groups_are_ordered_by_title(tmp_path):
+    registry = _registry(tmp_path)
+    registry.record_membership(-2, "bravo", present=True)
+    registry.record_membership(-1, "Alpha", present=True)
+    registry.set_allowed(-2, True)
 
-        async def get_chat_member(self, chat_id, user_id):
-            self.asked.append(chat_id)
-            return type("M", (), {"status": "member"})()
-
-    import asyncio
-
-    current = {"groups": (-1,)}
-    bot = Bot()
-    checker = MembershipChecker(bot, lambda: current["groups"], clock=lambda: 0.0)
-    asyncio.run(checker.is_member(1))
-    assert bot.asked == [-1]
-    current["groups"] = (-2,)
-    checker.clear()
-    asyncio.run(checker.is_member(1))
-    assert bot.asked == [-1, -2]
-
-
-@pytest.mark.parametrize(
-    ("username", "admin", "expected"),
-    [
-        ("Boss", "boss", True),
-        ("@boss", "BOSS", True),
-        ("other", "boss", False),
-        (None, "boss", False),
-        ("boss", None, False),
-        ("", "", False),
-    ],
-)
-def test_admin_username_matching(username, admin, expected):
-    assert is_admin_username(username, admin) is expected
+    reopened = GroupRegistry(Database(tmp_path / "spawn.db"))
+    assert [g.chat_id for g in reopened.groups()] == [-1, -2]  # casefold order
+    assert reopened.allowed_ids() == (-2,)

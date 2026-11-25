@@ -7,13 +7,25 @@ callback in a group gets no reply. Each member has separate Sessions in each gro
 
 from __future__ import annotations
 
+import logging
 import secrets
+from datetime import datetime, timezone
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
 from bot.dispatcher import TextJob
+from bot.group_comment import (
+    EMPTY_TEXT,
+    TOO_MANY_TEXT,
+    USAGE_TEXT,
+    CommentRequestError,
+    GroupMessage,
+    build_prompt,
+    parse_request,
+    select_messages,
+)
 from bot.group_trigger import mentions_bot, parse_trigger
 from bot.scope import GROUP_TYPES, store_key
 from bot.state import PendingSession, Services, active_sid
@@ -25,6 +37,12 @@ from bot.ui import (
     MenuCb,
     group_persona_choice_markup,
 )
+
+logger = logging.getLogger(__name__)
+
+# Telegram's GroupAnonymousBot. A message an admin sends "as the group" has this as its author,
+# so all such messages share one owner key, and the bot itself is marked as a bot.
+GROUP_ANONYMOUS_BOT_ID = 1087968824
 
 group_router = Router(name="kiro-bot-group")
 group_router.message.filter(F.chat.type.in_(GROUP_TYPES))
@@ -66,17 +84,53 @@ async def on_group_new(message: Message) -> None:
 async def on_group_persona(
     query: CallbackQuery, callback_data: GroupPersonaCb, services: Services
 ) -> None:
-    """Start the member's new Session in this group with the character they picked."""
-    if query.from_user.id != callback_data.user_id or callback_data.key not in PERSONAS:
+    """Start the picker's Session in this group with the character they picked.
+
+    The picker is the member who sent /new. When /new was sent as the group, the picker is
+    any member, and the Session belongs to the group's anonymous identity, the same identity
+    that messages sent as the group use.
+    """
+    anonymous_pick = callback_data.user_id == GROUP_ANONYMOUS_BOT_ID
+    if (not anonymous_pick and query.from_user.id != callback_data.user_id) or (
+        callback_data.key not in PERSONAS
+    ):
+        logger.info(
+            "group persona pick ignored: picker_is_issuer=%s known_key=%s",
+            query.from_user.id == callback_data.user_id,
+            callback_data.key in PERSONAS,
+        )
         await query.answer()  # someone else's picker, or an unknown character
         return
     if query.message is None:
+        logger.info("group persona pick without a message")
         await query.answer()
         return
+    logger.info("group persona pick accepted")
     persona = PERSONAS[callback_data.key]
-    _start_new_session(services, store_key(query.message.chat.id, query.from_user.id), persona)
+    _start_new_session(
+        services, store_key(query.message.chat.id, callback_data.user_id), persona
+    )
     await query.answer()
     await query.message.answer(persona.greeting_text or persona.group_new_text)
+
+
+@group_router.message(Command("comment"))
+async def on_group_comment(message: Message, services: Services, command: CommandObject) -> None:
+    """Comment on the last N messages or on the messages of a period, in the member's Session."""
+    if message.from_user is None:
+        return
+    try:
+        request = parse_request(command.args)
+    except CommentRequestError as exc:
+        text = TOO_MANY_TEXT if str(exc) == "too_many" else USAGE_TEXT
+        await message.reply(text)
+        return
+    now = datetime.now(timezone.utc)
+    chosen = select_messages(services.group_log.messages(message.chat.id), request, now)
+    if not chosen:
+        await message.reply(EMPTY_TEXT)
+        return
+    await _submit_group_prompt(message, services, build_prompt(chosen))
 
 
 @group_router.message(F.text)
@@ -85,13 +139,29 @@ async def on_group_text(message: Message, services: Services) -> None:
     text = message.text or ""
     if user is None or text.startswith("/"):
         return  # other commands are private-only
+    if not user.is_bot or user.id == GROUP_ANONYMOUS_BOT_ID:
+        services.group_log.record(
+            message.chat.id,
+            GroupMessage(
+                message_id=message.message_id,
+                when=message.date.astimezone(timezone.utc),
+                author=user.full_name,
+                text=text,
+            ),
+        )
     addressed = mentions_bot(text, services.bot_username) or _replies_to_bot(
         message, services.bot_id
     )
     prompt = parse_trigger(text, addressed=addressed)
     if prompt is None:
         return  # not addressed to the bot: no reply and no Kiro call
+    await _submit_group_prompt(message, services, prompt)
 
+
+async def _submit_group_prompt(message: Message, services: Services, prompt: str) -> None:
+    """Send a prompt to the member's Active_Session in this group, creating one if needed."""
+    user = message.from_user
+    assert user is not None
     key = store_key(message.chat.id, user.id)
     sid = active_sid(services, key)
     if sid is None:
@@ -129,4 +199,5 @@ async def on_group_other(message: Message) -> None:
 
 @group_router.callback_query()
 async def on_group_other_callback(query: CallbackQuery) -> None:
+    logger.info("group callback not routed to a handler: prefix=%s", (query.data or "")[:3])
     await query.answer()

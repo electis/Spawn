@@ -15,8 +15,11 @@ from bot.config import ConfigError, load_config
 from bot.credentials import CredentialError, load_token
 from bot.dispatcher import UserDispatcher
 from bot.envfile import EnvFileError, parse_env_file
+from bot.db import Database, DatabaseError
 from bot.gate import ContextGate
+from bot.group_comment import GroupLog
 from bot.group_handlers import group_router
+from bot.legacy_import import import_legacy
 from bot.groups import GroupRegistry, GroupsError
 from bot.handlers import router
 from bot.jobs import JobProcessor
@@ -55,14 +58,16 @@ async def run() -> int:
     for handler in logging.getLogger().handlers:
         handler.addFilter(redactor)
 
-    store = SessionStore(config.store_path)
-    groups = GroupRegistry(config.groups_path, seed_allowed=config.configured_group_ids)
     try:
-        await store.load()
-        groups.load()
-    except (CorruptStoreError, GroupsError) as exc:
+        db = Database(config.db_path)
+        import_legacy(
+            db, config.store_path, config.groups_path, config.configured_group_ids
+        )
+    except (DatabaseError, CorruptStoreError, GroupsError) as exc:
         log.error("%s", exc)
         return 1
+    store = SessionStore(db)
+    groups = GroupRegistry(db)
 
     bot = Bot(token=token)
     me = await bot.get_me()
@@ -87,6 +92,7 @@ async def run() -> int:
         admin_username=admin_username,
         bot_id=me.id,
         bot_username=me.username,
+        group_log=GroupLog(db),
     )
 
     dp = Dispatcher(storage=storage)
@@ -109,6 +115,7 @@ async def run() -> int:
         )
     finally:
         await runner.close()
+        db.close()
     return 0
 
 
