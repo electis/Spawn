@@ -1,27 +1,17 @@
-"""Session_Store: per-User Sessions in one JSON file with atomic writes.
+"""Session_Store: per-User Sessions in the bot database (tables users and sessions).
 
-Requirements 3.2, 3.3, 3.5, 4.5, 7.4, 7.5.
+Requirements 3.2, 3.3, 3.5, 4.5, 7.4, 7.5. Each change is one SQLite transaction. A failed
+change, including a StoreError for an unknown Session, leaves the stored data as it was.
+The owner key (bot/scope.py) is stored as text, because group keys do not fit in 64 bits.
 """
 
 from __future__ import annotations
 
-import asyncio
-import copy
-import json
-import logging
-import os
-import shutil
-import tempfile
-from collections.abc import Callable
-from contextlib import suppress
-from pathlib import Path
+import sqlite3
 from typing import Any
 
+from bot.db import Database
 from bot.models import SessionRecord, UserRecord
-
-logger = logging.getLogger(__name__)
-
-STORE_VERSION = 1
 
 
 class StoreError(Exception):
@@ -29,166 +19,126 @@ class StoreError(Exception):
 
 
 class CorruptStoreError(StoreError):
-    """The store file exists but cannot be parsed. The file is never overwritten."""
+    """The legacy JSON store cannot be parsed. Its file is left in place."""
 
 
-class StoreWriteError(StoreError):
-    """An atomic write failed. The previous file is kept."""
+_SESSION_COLUMNS = "sid, name, session_id, context_usage, created_at, updated_at, persona"
 
 
-def _encode(users: dict[int, UserRecord]) -> str:
-    data = {
-        "version": STORE_VERSION,
-        "users": {str(uid): rec.to_dict() for uid, rec in users.items()},
-    }
-    return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+def _key(user_id: int) -> str:
+    return str(user_id)
 
 
-def _decode(text: str) -> dict[int, UserRecord]:
-    data: Any = json.loads(text)
-    if not isinstance(data, dict) or data.get("version") != STORE_VERSION:
-        raise ValueError("unsupported or missing store version")
-    users = data.get("users")
-    if not isinstance(users, dict):
-        raise ValueError("users must be an object")
-    return {int(key): UserRecord.from_dict(value) for key, value in users.items()}
+def _session(row: sqlite3.Row) -> SessionRecord:
+    return SessionRecord(
+        sid=row["sid"],
+        name=row["name"],
+        session_id=row["session_id"],
+        context_usage=row["context_usage"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        persona=row["persona"],
+    )
 
 
 class SessionStore:
-    def __init__(self, path: Path) -> None:
-        self._path = Path(path)
-        self._users: dict[int, UserRecord] = {}
-        self._lock = asyncio.Lock()
+    def __init__(self, db: Database) -> None:
+        self._db = db
 
     @property
-    def path(self) -> Path:
-        return self._path
-
-    async def load(self) -> None:
-        async with self._lock:
-            if not self._path.exists():
-                self._users = {}
-                return
-            text = self._path.read_text(encoding="utf-8")
-            try:
-                users = _decode(text)
-            except (ValueError, KeyError, TypeError) as exc:
-                backup = self._path.with_name(self._path.name + ".bak")
-                shutil.copy2(self._path, backup)
-                logger.error("session store is corrupt; copied to %s", backup)
-                raise CorruptStoreError(f"session store is corrupt: {self._path}") from exc
-            self._users = users
+    def _conn(self) -> sqlite3.Connection:
+        return self._db.conn
 
     def get_user(self, user_id: int) -> UserRecord:
-        """Return a copy of the User's record. An unknown User gets an empty record."""
-        return copy.deepcopy(self._users.get(user_id, UserRecord()))
+        """Return the User's record. An unknown User gets an empty record."""
+        user = self._conn.execute(
+            "SELECT active_sid FROM users WHERE owner_key = ?", (_key(user_id),)
+        ).fetchone()
+        if user is None:
+            return UserRecord()
+        rows = self._conn.execute(
+            f"SELECT {_SESSION_COLUMNS} FROM sessions WHERE owner_key = ? ORDER BY rowid",
+            (_key(user_id),),
+        ).fetchall()
+        return UserRecord(active_sid=user["active_sid"], sessions=[_session(r) for r in rows])
 
-    def _write(self, users: dict[int, UserRecord]) -> None:
-        text = _encode(users)
-        directory = self._path.parent
-        directory.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=directory, prefix=self._path.name + ".", suffix=".tmp"
+    def find_session(self, user_id: int, sid: str) -> SessionRecord | None:
+        row = self._conn.execute(
+            f"SELECT {_SESSION_COLUMNS} FROM sessions WHERE owner_key = ? AND sid = ?",
+            (_key(user_id), sid),
+        ).fetchone()
+        return None if row is None else _session(row)
+
+    def _ensure_user(self, user_id: int) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO users (owner_key, active_sid) VALUES (?, NULL)",
+            (_key(user_id),),
         )
-        try:
-            os.chmod(tmp_name, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(text)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_name, self._path)
-        except OSError as exc:
-            with suppress(OSError):
-                os.unlink(tmp_name)
-            logger.error("session store write failed: %s", exc)
-            raise StoreWriteError("session store write failed") from exc
 
-    async def _mutate(self, change: Callable[[dict[int, UserRecord]], Any]) -> Any:
-        """Apply a change to a copy, write it, then commit it. A failed write changes nothing."""
-        async with self._lock:
-            new_users = copy.deepcopy(self._users)
-            result = change(new_users)
-            self._write(new_users)
-            self._users = new_users
-            return result
+    def _update_session(self, user_id: int, sid: str, values: dict[str, Any]) -> None:
+        """Set columns on one Session. An unknown Session is a StoreError."""
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        cursor = self._conn.execute(
+            f"UPDATE sessions SET {assignments} WHERE owner_key = ? AND sid = ?",
+            (*values.values(), _key(user_id), sid),
+        )
+        if cursor.rowcount == 0:
+            raise StoreError(f"unknown session {sid}")
 
     async def add_session(self, user_id: int, rec: SessionRecord) -> None:
-        def change(users: dict[int, UserRecord]) -> None:
-            user = users.setdefault(user_id, UserRecord())
-            if any(s.sid == rec.sid for s in user.sessions):
-                raise StoreError(f"session {rec.sid} already exists")
-            user.sessions.append(rec)
-
-        await self._mutate(change)
+        with self._conn:
+            self._ensure_user(user_id)
+            try:
+                self._conn.execute(
+                    "INSERT INTO sessions (owner_key, sid, name, session_id, context_usage, "
+                    "created_at, updated_at, persona) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        _key(user_id),
+                        rec.sid,
+                        rec.name,
+                        rec.session_id,
+                        rec.context_usage,
+                        rec.created_at,
+                        rec.updated_at,
+                        rec.persona,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StoreError(f"session {rec.sid} already exists") from exc
 
     async def set_active(self, user_id: int, sid: str | None) -> None:
-        def change(users: dict[int, UserRecord]) -> None:
-            user = users.setdefault(user_id, UserRecord())
-            if sid is not None and not any(s.sid == sid for s in user.sessions):
+        with self._conn:
+            self._ensure_user(user_id)
+            if sid is not None and self.find_session(user_id, sid) is None:
                 raise StoreError(f"unknown session {sid}")
-            user.active_sid = sid
-
-        await self._mutate(change)
+            self._conn.execute(
+                "UPDATE users SET active_sid = ? WHERE owner_key = ?", (sid, _key(user_id))
+            )
 
     async def rename_session(self, user_id: int, sid: str, name: str) -> None:
-        def change(users: dict[int, UserRecord]) -> None:
-            user = users.get(user_id)
-            session = None
-            if user is not None:
-                session = next((s for s in user.sessions if s.sid == sid), None)
-            if session is None:
-                raise StoreError(f"unknown session {sid}")
-            session.name = name
-
-        await self._mutate(change)
+        with self._conn:
+            self._update_session(user_id, sid, {"name": name})
 
     async def set_context_usage(self, user_id: int, sid: str, usage: float) -> None:
         """Replace one Session's raw usage. None is refused so a value is never reset (4.5)."""
         if usage is None or isinstance(usage, bool) or not isinstance(usage, (int, float)):
             raise TypeError("context usage must be a number; None is not stored")
-
-        def change(users: dict[int, UserRecord]) -> None:
-            user = users.get(user_id)
-            session = None
-            if user is not None:
-                session = next((s for s in user.sessions if s.sid == sid), None)
-            if session is None:
-                raise StoreError(f"unknown session {sid}")
-            session.context_usage = float(usage)
-
-        await self._mutate(change)
+        with self._conn:
+            self._update_session(user_id, sid, {"context_usage": float(usage)})
 
     async def touch_session(self, user_id: int, sid: str, when: str) -> None:
         """Set updated_at, the time of the last message in the Session (Requirement 6.1)."""
-
-        def change(users: dict[int, UserRecord]) -> None:
-            user = users.get(user_id)
-            session = None
-            if user is not None:
-                session = next((s for s in user.sessions if s.sid == sid), None)
-            if session is None:
-                raise StoreError(f"unknown session {sid}")
-            session.updated_at = when
-
-        await self._mutate(change)
-
-    def find_session(self, user_id: int, sid: str) -> SessionRecord | None:
-        user = self._users.get(user_id)
-        if user is None:
-            return None
-        found = next((s for s in user.sessions if s.sid == sid), None)
-        return None if found is None else copy.deepcopy(found)
+        with self._conn:
+            self._update_session(user_id, sid, {"updated_at": when})
 
     async def remove_session(self, user_id: int, sid: str) -> None:
-        def change(users: dict[int, UserRecord]) -> None:
-            user = users.get(user_id)
-            if user is None:
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM sessions WHERE owner_key = ? AND sid = ?", (_key(user_id), sid)
+            )
+            if cursor.rowcount == 0:
                 raise StoreError(f"unknown session {sid}")
-            remaining = [s for s in user.sessions if s.sid != sid]
-            if len(remaining) == len(user.sessions):
-                raise StoreError(f"unknown session {sid}")
-            user.sessions = remaining
-            if user.active_sid == sid:
-                user.active_sid = None
-
-        await self._mutate(change)
+            self._conn.execute(
+                "UPDATE users SET active_sid = NULL WHERE owner_key = ? AND active_sid = ?",
+                (_key(user_id), sid),
+            )

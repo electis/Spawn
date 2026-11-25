@@ -6,8 +6,10 @@ from dataclasses import dataclass, field
 
 from aiogram.fsm.state import State, StatesGroup
 
+from bot.db import Database
 from bot.dispatcher import UserDispatcher
 from bot.gate import ContextGate
+from bot.group_comment import GroupLog
 from bot.groups import GroupRegistry
 from bot.membership import MembershipChecker
 from bot.persona import DEFAULT_PERSONA, DEFAULT_PERSONA_KEY, Persona, resolve_persona
@@ -39,6 +41,7 @@ class Services:
     admin_username: str | None = None
     bot_id: int | None = None
     bot_username: str | None = None
+    group_log: GroupLog = field(default_factory=lambda: GroupLog(Database(":memory:")))
 
     def group_is_open(self, chat_id: int) -> bool:
         """A group answers only when the admin allowed it and the bot is still in it."""

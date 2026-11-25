@@ -3,6 +3,7 @@
 import asyncio
 from types import SimpleNamespace
 
+from bot.db import Database
 from bot.dispatcher import UserDispatcher
 from bot.gate import ContextGate
 from bot.handlers import _ensure_first_session, on_command_start
@@ -26,7 +27,7 @@ class _Message(SimpleNamespace):
 
 
 def _services(tmp_path):
-    store = SessionStore(tmp_path / "sessions.json")
+    store = SessionStore(Database(tmp_path / "spawn.db"))
 
     async def handle(job):
         return None

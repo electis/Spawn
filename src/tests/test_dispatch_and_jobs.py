@@ -7,6 +7,7 @@ from pathlib import Path
 import hypothesis.strategies as st
 from hypothesis import given, settings
 
+from bot.db import Database
 from bot.context_display import is_full
 from bot.dispatcher import DeleteJob, TextJob, UserDispatcher
 from bot.gate import ContextGate
@@ -122,7 +123,7 @@ def _session(sid="aaaaaaaa", usage=None, session_id="sess_00000001"):
 
 
 def _store(tmp: Path) -> SessionStore:
-    return SessionStore(tmp / "store.json")
+    return SessionStore(Database(tmp / "spawn.db"))
 
 
 # Feature: telegram-kiro-bot, Property 18: Per-User requests run in order, one at a time
@@ -269,7 +270,6 @@ def test_failed_first_request_leaves_store_unchanged(tmp_path):
     asyncio.run(run())
     assert store.get_user(1).sessions == []
     assert store.get_user(1).active_sid is None
-    assert not (tmp_path / "store.json").exists()
     assert notifier.texts and notifier.replies == []
 
 

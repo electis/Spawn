@@ -25,7 +25,8 @@ class BotConfig:
     kiro_bin: str
     env_file: Path  # holds TELEGRAM_BOT_TOKEN, KIRO_API_KEY, and ADMIN_USERNAME, mode 0600
     membership_ttl_seconds: float
-    groups_path: Path  # allowed-groups registry, managed by the admin
+    groups_path: Path  # legacy allowed-groups JSON, imported once into the database
+    db_path: Path  # SQLite database: Sessions, groups, and the group message log
     acp_home: Path = DEFAULT_ACP_HOME  # kiro-cli HOME for ACP processes; chat.defaultModel lives here
 
 
@@ -57,6 +58,9 @@ def parse_config(text: str) -> BotConfig:
             membership_ttl_seconds=float(ttl),
             groups_path=Path(
                 data.get("groups_path", Path(data["store_path"]).parent / "groups.json")
+            ),
+            db_path=Path(
+                data.get("db_path", Path(data["store_path"]).parent / "spawn.db")
             ),
             acp_home=Path(data.get("acp_home", DEFAULT_ACP_HOME)),
         )
