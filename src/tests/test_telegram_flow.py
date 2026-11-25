@@ -513,7 +513,7 @@ def test_writer_conversation_uses_its_prompt_and_postfix(tmp_path):
     uid = next(_ids)
     asyncio.run(_feed(_callback_update(uid, ui.MenuCb(action="new").pack()), services))
     asyncio.run(_feed(_callback_update(uid, ui.PersonaCb(key="writer").pack()), services))
-    assert PERSONAS["writer"].greeting_text == ""  # no greeting, so nothing extra is sent
+    assert PERSONAS["writer"].start_text in _sent()  # the pick is answered, not silent
     asyncio.run(_feed(_text_update(uid, "Привет"), services))
     writer = PERSONAS["writer"]
     assert runner.prompts[1] == ("sess_0000aaaa", writer.first_message("Привет"))

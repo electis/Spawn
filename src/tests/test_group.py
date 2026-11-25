@@ -228,7 +228,7 @@ def test_group_persona_pick_starts_session_with_that_character(tmp_path):
     pending = services.pending[store_key(GROUP, USER)]
     assert pending.persona == "writer"
     assert pending.name.startswith("Беседа ") and pending.name.endswith("(Писатель)")
-    assert query.message.sent == [(DEFAULT_PERSONA.group_new_text, None)]  # the writer has no greeting yet
+    assert query.message.sent == [(PERSONAS["writer"].greeting_text, None)]
 
 
 def test_group_persona_pick_by_another_member_is_ignored(tmp_path):

@@ -27,19 +27,20 @@ def test_writer_is_a_persona_subclass_registered_under_its_key():
     assert get_persona("writer").display_name == "Писатель"
 
 
-def test_writer_prompt_holds_only_prohibitions():
+def test_writer_prompt_describes_twain_on_earth_and_scribe_in_heaven():
     prompt = WriterPersona.prompt
-    assert prompt.startswith("Do not")
+    assert prompt.startswith("You are Mark Twain")
+    assert "scribe of God" in prompt
+    assert "Do not present your answers as God's word" in prompt
     assert "Спаун" not in prompt and "Spawn" not in prompt
-    for line in prompt.splitlines():
-        assert line.startswith(("Do not", "Never", "You are not")), line
+    assert "You are not an AI" in prompt
 
 
-def test_writer_inherits_neutral_defaults_from_the_base_class():
+def test_writer_has_its_own_texts_and_inherits_the_rest():
     writer = WriterPersona()
-    assert writer.refusal_replies == Persona.refusal_replies
-    assert writer.greeting_text == ""
-    assert writer.start_text == ""
+    assert writer.refusal_replies != Persona.refusal_replies
+    assert writer.greeting_text and writer.start_text
+    assert writer.no_active == Persona.no_active  # phrases it does not override keep the base text
 
 
 def test_writer_first_message_wraps_the_user_text_with_its_prompt():
@@ -155,3 +156,14 @@ def test_persona_for_returns_the_character_of_the_conversation(tmp_path):
     services = Services(store=store, gate=ContextGate(store), dispatcher=object())
     assert persona_for(services, 1) is PERSONAS["writer"]
     assert persona_for(services, 2) is DEFAULT_PERSONA  # no conversation: the default character
+
+def test_every_persona_has_start_text_greeting_and_refusals():
+    # A character without start_text sends nothing after the pick, which looks like a hang.
+    for persona in PERSONAS.values():
+        assert persona.start_text, persona.key
+        assert persona.greeting_text, persona.key
+        assert persona.refusal_replies, persona.key
+
+
+def test_writer_answers_to_its_names():
+    assert PERSONAS["writer"].names == ("писатель", "писец", "марк")
