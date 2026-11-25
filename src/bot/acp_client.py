@@ -12,11 +12,11 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from bot.kiro_parser import usage_from_meta
+from bot.kiro_parser import credits_from_meta, usage_from_meta
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,8 @@ class AcpError(Exception):
 class PromptResult:
     stop_reason: str | None
     text: str
-    usage: float | None
+    usage: float | None  # context window fill, 0..1
+    credits: float | None = None  # credits billed for this turn
 
 
 @dataclass
@@ -45,6 +46,8 @@ class _Collector:
     chunks: list[str] = field(default_factory=list)
     primary: float | None = None
     fallback: float | None = None
+    credits: float | None = None
+    on_text: Callable[[str], None] | None = None  # called with each reply chunk as it arrives
 
     def feed(self, update: Mapping[str, Any]) -> None:
         kind = update.get("sessionUpdate")
@@ -52,16 +55,33 @@ class _Collector:
             content = update.get("content")
             if isinstance(content, Mapping) and isinstance(content.get("text"), str):
                 self.chunks.append(content["text"])
+                if self.on_text is not None:
+                    self.on_text(content["text"])
         elif kind == "session_info_update":
             primary, fallback = usage_from_meta(update.get("_meta"))
             if primary is not None:
                 self.primary = primary
             if fallback is not None:
                 self.fallback = fallback
+            turn_credits = credits_from_meta(update.get("_meta"))
+            if turn_credits is not None:
+                self.credits = turn_credits
 
     @property
     def usage(self) -> float | None:
         return self.primary if self.primary is not None else self.fallback
+
+
+def _model_values(config_options: Any) -> list[str]:
+    """Return the model ids offered in session/new configOptions (option id "model")."""
+    if not isinstance(config_options, list):
+        return []
+    for option in config_options:
+        if isinstance(option, dict) and option.get("id") == "model":
+            values = option.get("options")
+            if isinstance(values, list):
+                return [v["value"] for v in values if isinstance(v, dict) and isinstance(v.get("value"), str)]
+    return []
 
 
 class AcpConnection:
@@ -78,6 +98,7 @@ class AcpConnection:
         self._dead = False  # set when kiro-cli stops answering, even before its exit code is known
         self.lock = asyncio.Lock()
         self.loaded: set[str] = set()
+        self.model_options: list[str] = []  # model ids reported by the last session/new
         self.last_used = time.monotonic()
 
     @property
@@ -121,7 +142,24 @@ class AcpConnection:
         if not isinstance(session_id, str) or not session_id:
             raise AcpError("kiro-cli returned no session id")
         self.loaded.add(session_id)
+        self.model_options = _model_values(result.get("configOptions"))
         return session_id
+
+    async def list_session_ids(self, cwd: str) -> set[str]:
+        """Ids of the stored sessions in cwd, across all pages of session/list."""
+        ids: set[str] = set()
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"cwd": cwd}
+            if cursor:
+                params["cursor"] = cursor
+            result = await self._request("session/list", params, REQUEST_TIMEOUT_SECONDS)
+            for item in result.get("sessions") or []:
+                if isinstance(item, dict) and isinstance(item.get("sessionId"), str):
+                    ids.add(item["sessionId"])
+            cursor = result.get("nextCursor")
+            if not isinstance(cursor, str) or not cursor:
+                return ids
 
     async def load_session(self, session_id: str, cwd: str) -> None:
         await self._request(
@@ -137,9 +175,23 @@ class AcpConnection:
         )
         self.loaded.discard(session_id)
 
-    async def prompt(self, session_id: str, text: str, timeout: float) -> PromptResult:
+    async def set_config_option(self, session_id: str, config_id: str, value: str) -> None:
+        """Change one session option, for example the model (`configId="model"`)."""
+        await self._request(
+            "session/set_config_option",
+            {"sessionId": session_id, "configId": config_id, "value": value},
+            REQUEST_TIMEOUT_SECONDS,
+        )
+
+    async def prompt(
+        self,
+        session_id: str,
+        text: str,
+        timeout: float,
+        on_text: Callable[[str], None] | None = None,
+    ) -> PromptResult:
         """Send one prompt and wait for its end. A timed-out connection is closed."""
-        self._collector = _Collector()
+        self._collector = _Collector(on_text=on_text)
         try:
             try:
                 response = await self._request(
@@ -159,6 +211,7 @@ class AcpConnection:
             stop_reason=stop_reason if isinstance(stop_reason, str) else None,
             text="".join(collector.chunks),
             usage=collector.usage,
+            credits=collector.credits,
         )
 
     async def close(self) -> None:

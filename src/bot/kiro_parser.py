@@ -43,3 +43,22 @@ def usage_from_meta(meta: Any) -> tuple[float | None, float | None]:
     nested = kiro.get("contextUsage")
     fallback = _number(nested.get("usagePercentage")) if isinstance(nested, Mapping) else None
     return primary, fallback
+
+
+def credits_from_meta(meta: Any) -> float | None:
+    """Return the credits billed for one turn, from a turn_completion update, or None."""
+    if not isinstance(meta, Mapping):
+        return None
+    kiro = meta.get("kiro")
+    if not isinstance(kiro, Mapping) or kiro.get("kind") != "turn_completion":
+        return None
+    summaries = kiro.get("promptTurnSummaries")
+    if not isinstance(summaries, list):
+        return None
+    values = [
+        _number(s.get("usage"))
+        for s in summaries
+        if isinstance(s, Mapping) and s.get("unit") == "credit"
+    ]
+    numbers = [v for v in values if v is not None]
+    return sum(numbers) if numbers else None
